@@ -1,0 +1,65 @@
+# Example caller: plan on PR; plan + gated apply (same run) on main.
+# The apply job downloads the plan artifact uploaded by the plan job, so both
+# must run in the same workflow run. Gate apply with a GitHub environment
+# that has required reviewers.
+name: Terraform
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ["infra/**"]
+  push:
+    branches: [main]
+    paths: ["infra/**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan
+    permissions:
+      contents: read
+      id-token: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/terraform-plan.yml@v1
+    with:
+      working-directory: infra
+      terraform-version: "1.10.5"
+      backend-config: |
+        resource_group_name=rg-tfstate
+        storage_account_name=sttfstate
+        container_name=tfstate
+        key=bjjeire.tfstate
+      var-file: environments/production.tfvars
+      plan-artifact-name: tfplan-production
+    secrets:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+  apply:
+    name: Apply
+    needs: plan
+    if: github.ref == 'refs/heads/main' && needs.plan.outputs.has-changes == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/terraform-apply.yml@v1
+    with:
+      working-directory: infra
+      terraform-version: "1.10.5"
+      backend-config: |
+        resource_group_name=rg-tfstate
+        storage_account_name=sttfstate
+        container_name=tfstate
+        key=bjjeire.tfstate
+      environment: production
+      plan-artifact-name: tfplan-production
+    secrets:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}

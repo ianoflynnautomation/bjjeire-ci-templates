@@ -1,0 +1,17 @@
+name: 'Setup .NET Cache'
+description: 'Caches NuGet packages. Assumes the .NET SDK is already present (container-first jobs — the container image is the source of truth for the toolchain version).'
+inputs:
+  cache-key-prefix:
+    description: 'Prefix for the cache key, useful to segment caches per solution in a monorepo.'
+    required: false
+    default: 'nuget'
+runs:
+  using: "composite"
+  steps:
+    - name: Cache NuGet packages
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-${{ inputs.cache-key-prefix }}-${{ hashFiles('**/packages.lock.json', '**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.cache-key-prefix }}-

@@ -1,0 +1,31 @@
+name: 'Setup Node Cache'
+description: 'Caches node_modules and optionally runs `npm ci`. Assumes Node is already present (container-first jobs — the container image is the source of truth for the toolchain version).'
+inputs:
+  working-directory:
+    description: 'Directory containing package-lock.json; used for the cache key and `npm ci`.'
+    required: false
+    default: '.'
+  install:
+    description: 'When `true`, run `npm ci` in the working directory after the cache restore.'
+    required: false
+    default: 'false'
+runs:
+  using: "composite"
+  steps:
+    - name: Cache Node modules
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+      id: node_cache
+      with:
+        path: ${{ inputs.working-directory }}/node_modules
+        key: ${{ runner.os }}-node-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory), format('{0}/yarn.lock', inputs.working-directory)) }}
+        restore-keys: |
+          ${{ runner.os }}-node-
+
+    - name: Install dependencies (npm ci)
+      if: inputs.install == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        echo "::group::npm ci"
+        npm ci
+        echo "::endgroup::"

@@ -1,0 +1,57 @@
+# Example caller: build + push an image to GHCR on main, build-only on PRs.
+# Copy into your repo as .github/workflows/build-push.yml and adjust paths.
+name: Build & Push Images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  api-image:
+    name: API Image
+    # Caller must grant the superset of every job in the reusable workflow,
+    # or GitHub rejects the run at parse time.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/docker-build-push.yml@v1
+    with:
+      image-name: bjjeire-api
+      dockerfile: ./src/BjjEire.Api/Dockerfile
+      push: ${{ github.event_name != 'pull_request' }}
+      labels: |
+        org.opencontainers.image.title=bjjeire-api
+        org.opencontainers.image.vendor=BjjEire
+        org.opencontainers.image.licenses=MIT
+
+  frontend-image:
+    name: Frontend Image
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/docker-build-push.yml@v1
+    with:
+      image-name: bjjeire-frontend
+      dockerfile: ./src/bjjeire-app/Dockerfile
+      push: ${{ github.event_name != 'pull_request' }}
+    secrets:
+      # Public config baked into the SPA bundle — never real credentials.
+      SECRET_BUILD_ARGS: |
+        VITE_APP_MSAL_CLIENT_ID=${{ secrets.VITE_APP_MSAL_CLIENT_ID }}
+        VITE_APP_URL=${{ secrets.VITE_APP_URL }}

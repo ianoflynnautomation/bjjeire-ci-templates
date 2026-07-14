@@ -1,0 +1,54 @@
+name: Release
+
+# release-please cuts SemVer tags (vX.Y.Z) from conventional commits; on each
+# release the floating major tag (vX) is force-moved so consumers pinned to
+# @v1 pick up non-breaking updates automatically.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      major: ${{ steps.release.outputs.major }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@7987652d64b4581673a76e33ad5e98e3dd56832f  # v4.1.3
+        with:
+          release-type: simple
+
+  update-major-tag:
+    name: Move Floating Major Tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Force-move vMAJOR tag to the new release
+        shell: bash
+        env:
+          MAJOR: ${{ needs.release-please.outputs.major }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -fa "v${MAJOR}" "${TAG_NAME}^{}" -m "Release ${TAG_NAME}"
+          git push origin "v${MAJOR}" --force
+          echo "::notice title=Release::v${MAJOR} now points at ${TAG_NAME}"

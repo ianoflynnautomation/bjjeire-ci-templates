@@ -1,0 +1,34 @@
+# Example caller: .NET PR validation using the shared dotnet-build workflow.
+# Copy into your repo as .github/workflows/ci-pr.yml and adjust paths.
+name: CI PR Validation
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet:
+    name: .NET Build & Test
+    permissions:
+      contents: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/dotnet-build.yml@v1
+    with:
+      solution-path: BjjEire.sln
+      configuration: Release
+      container-image: mcr.microsoft.com/dotnet/sdk:10.0
+      run-format-check: true
+      format-include: ./src/
+      format-exclude: ./src/BjjEire.Aspire.AppHost/
+      test-projects: >-
+        [
+          {"name":"ApiUnitTests","project":"tests/BjjEire.Api.UnitTests/BjjEire.Api.UnitTests.csproj","filter":"Category!=Ignore"},
+          {"name":"DomainUnitTests","project":"tests/BjjEire.Domain.UnitTests/BjjEire.Domain.UnitTests.csproj","filter":"Category!=Ignore"},
+          {"name":"ApplicationUnitTests","project":"tests/BjjEire.Application.UnitTests/BjjEire.Application.UnitTests.csproj","filter":"Category!=Ignore"}
+        ]

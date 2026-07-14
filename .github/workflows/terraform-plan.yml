@@ -1,0 +1,204 @@
+name: Terraform Plan (Reusable)
+
+# Reusable golden path for Terraform: fmt + validate, then plan with the
+# binary plan file uploaded as an artifact for terraform-apply.yml to consume
+# in the same workflow run.
+#
+# Auth is Azure OIDC (ARM_USE_OIDC) via the ARM_* secrets — no static
+# credentials. For other clouds, omit the ARM_* secrets and provide auth via
+# `secrets: inherit` + env on the caller, or extend this workflow.
+#
+# Required caller permissions:
+#   contents: read
+#   id-token: write
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Directory containing the Terraform root module."
+        required: false
+        type: string
+        default: "."
+      terraform-version:
+        description: "Terraform CLI version constraint passed to hashicorp/setup-terraform."
+        required: false
+        type: string
+        default: "latest"
+      backend-config:
+        description: "Multi-line `key=value` pairs, each passed to `terraform init -backend-config=`."
+        required: false
+        type: string
+        default: ""
+      var-file:
+        description: "Optional path (relative to working-directory) passed to `terraform plan -var-file=`."
+        required: false
+        type: string
+        default: ""
+      workspace:
+        description: "Optional Terraform workspace to select (created if missing)."
+        required: false
+        type: string
+        default: ""
+      plan-args:
+        description: "Extra arguments appended to `terraform plan`."
+        required: false
+        type: string
+        default: ""
+      environment:
+        description: "Optional GitHub environment for the plan job (scopes environment secrets/vars)."
+        required: false
+        type: string
+        default: ""
+      plan-artifact-name:
+        description: "Artifact name for the binary plan file consumed by terraform-apply.yml."
+        required: false
+        type: string
+        default: "tfplan"
+    secrets:
+      ARM_CLIENT_ID:
+        description: "Azure AD app (workload identity) client ID for OIDC auth."
+        required: false
+      ARM_TENANT_ID:
+        description: "Azure tenant ID for OIDC auth."
+        required: false
+      ARM_SUBSCRIPTION_ID:
+        description: "Azure subscription ID."
+        required: false
+    outputs:
+      has-changes:
+        description: "true when the plan contains changes (detailed exit code 2)."
+        value: ${{ jobs.plan.outputs.has_changes }}
+      plan-artifact-name:
+        description: "Name of the uploaded plan artifact."
+        value: ${{ inputs.plan-artifact-name }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3.1.2
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+      - name: Terraform fmt
+        shell: bash
+        run: |
+          echo "::group::terraform fmt -check"
+          terraform fmt -check -recursive -diff
+          echo "::endgroup::"
+      - name: Terraform validate
+        shell: bash
+        run: |
+          echo "::group::terraform init (no backend)"
+          terraform init -backend=false -input=false
+          echo "::endgroup::"
+          echo "::group::terraform validate"
+          terraform validate
+          echo "::endgroup::"
+          echo "::notice title=Terraform::fmt + validate passed"
+
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3.1.2
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+      - name: Terraform init
+        shell: bash
+        env:
+          BACKEND_CONFIG: ${{ inputs.backend-config }}
+        run: |
+          echo "::group::terraform init"
+          BACKEND_ARGS=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && BACKEND_ARGS+=("-backend-config=${line}")
+          done <<< "$BACKEND_CONFIG"
+          terraform init "${BACKEND_ARGS[@]}"
+          echo "::endgroup::"
+      - name: Select workspace
+        if: inputs.workspace != ''
+        shell: bash
+        env:
+          TF_WORKSPACE_NAME: ${{ inputs.workspace }}
+        run: terraform workspace select -or-create "$TF_WORKSPACE_NAME"
+      - name: Terraform plan
+        id: plan
+        shell: bash
+        env:
+          VAR_FILE: ${{ inputs.var-file }}
+          PLAN_ARGS: ${{ inputs.plan-args }}
+        run: |
+          echo "::group::terraform plan"
+          VAR_FILE_ARG=()
+          if [ -n "$VAR_FILE" ]; then
+            VAR_FILE_ARG=(-var-file="$VAR_FILE")
+          fi
+          set +e
+          # shellcheck disable=SC2086
+          terraform plan -out=tfplan -detailed-exitcode "${VAR_FILE_ARG[@]}" $PLAN_ARGS
+          ec=$?
+          set -e
+          echo "::endgroup::"
+          case $ec in
+            0)
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              echo "::notice title=Terraform plan::No changes" ;;
+            2)
+              echo "has_changes=true" >> "$GITHUB_OUTPUT"
+              echo "::notice title=Terraform plan::Changes detected" ;;
+            *)
+              echo "::error title=Terraform plan::Plan failed (exit $ec)"
+              exit "$ec" ;;
+          esac
+      - name: Write plan summary
+        shell: bash
+        run: |
+          PLAN_TEXT=$(terraform show -no-color tfplan | head -c 60000)
+          {
+            echo "### Terraform plan"
+            echo ""
+            echo '```terraform'
+            echo "$PLAN_TEXT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ inputs.plan-artifact-name }}
+          path: ${{ inputs.working-directory }}/tfplan
+          if-no-files-found: error
+          retention-days: 1

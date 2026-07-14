@@ -1,0 +1,23 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+  # Composite actions are not under .github/workflows — register each directory
+  - package-ecosystem: github-actions
+    directory: "/actions/setup-dotnet-cached"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/setup-node-cached"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/dotnet-run-tests"
+    schedule:
+      interval: weekly

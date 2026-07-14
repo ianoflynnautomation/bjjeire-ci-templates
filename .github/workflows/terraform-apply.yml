@@ -1,0 +1,129 @@
+name: Terraform Apply (Reusable)
+
+# Applies the exact binary plan produced by terraform-plan.yml. Designed to
+# run in the SAME workflow run as the plan job (artifacts do not cross runs);
+# gate the apply with a GitHub environment that has required reviewers.
+#
+# Required caller permissions:
+#   contents: read
+#   id-token: write
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Directory containing the Terraform root module (must match the plan job)."
+        required: false
+        type: string
+        default: "."
+      terraform-version:
+        description: "Terraform CLI version constraint passed to hashicorp/setup-terraform."
+        required: false
+        type: string
+        default: "latest"
+      backend-config:
+        description: "Multi-line `key=value` pairs, each passed to `terraform init -backend-config=` (must match the plan job)."
+        required: false
+        type: string
+        default: ""
+      workspace:
+        description: "Optional Terraform workspace to select (must match the plan job)."
+        required: false
+        type: string
+        default: ""
+      environment:
+        description: "GitHub environment gating the apply — configure required reviewers there for manual approval."
+        required: true
+        type: string
+      plan-artifact-name:
+        description: "Artifact name of the binary plan file uploaded by terraform-plan.yml."
+        required: false
+        type: string
+        default: "tfplan"
+    secrets:
+      ARM_CLIENT_ID:
+        description: "Azure AD app (workload identity) client ID for OIDC auth."
+        required: false
+      ARM_TENANT_ID:
+        description: "Azure tenant ID for OIDC auth."
+        required: false
+      ARM_SUBSCRIPTION_ID:
+        description: "Azure subscription ID."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    name: Apply
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3.1.2
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+      - name: Download plan artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ inputs.plan-artifact-name }}
+          path: ${{ inputs.working-directory }}
+      - name: Terraform init
+        shell: bash
+        env:
+          BACKEND_CONFIG: ${{ inputs.backend-config }}
+        run: |
+          echo "::group::terraform init"
+          BACKEND_ARGS=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && BACKEND_ARGS+=("-backend-config=${line}")
+          done <<< "$BACKEND_CONFIG"
+          terraform init "${BACKEND_ARGS[@]}"
+          echo "::endgroup::"
+      - name: Select workspace
+        if: inputs.workspace != ''
+        shell: bash
+        env:
+          TF_WORKSPACE_NAME: ${{ inputs.workspace }}
+        run: terraform workspace select "$TF_WORKSPACE_NAME"
+      - name: Terraform apply
+        shell: bash
+        run: |
+          echo "::group::terraform apply"
+          terraform apply -auto-approve tfplan
+          echo "::endgroup::"
+          echo "::notice title=Terraform apply::Applied plan from artifact '${{ inputs.plan-artifact-name }}'"
+      - name: Write apply summary
+        if: always()
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          WORKDIR: ${{ inputs.working-directory }}
+        run: |
+          {
+            echo "### Terraform apply"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Environment | \`${ENVIRONMENT}\` |"
+            echo "| Module | \`${WORKDIR}\` |"
+            echo "| Result | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

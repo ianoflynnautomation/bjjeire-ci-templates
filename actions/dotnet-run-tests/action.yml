@@ -1,0 +1,60 @@
+name: 'Run .NET Tests'
+description: 'Runs a single .NET test project with TRX output and artifact upload. Pair with a build job that shares bin/obj via artifact when using no-build.'
+inputs:
+  project-path:
+    description: 'Path to the .NET test project file (.csproj).'
+    required: true
+  test-results-name-prefix:
+    description: 'Prefix for the TRX results file and the uploaded artifact name.'
+    required: true
+  test-filter-criteria:
+    description: 'Filter passed to `dotnet test --filter` (e.g. Category!=Ignore).'
+    required: false
+    default: ''
+  configuration:
+    description: 'Build configuration.'
+    required: false
+    default: 'Release'
+  no-build:
+    description: 'Run against pre-built output (appends --no-build --no-restore). Requires bin/obj to be present, e.g. downloaded from a build artifact.'
+    required: false
+    default: 'false'
+runs:
+  using: "composite"
+  steps:
+    - name: Run tests
+      shell: bash
+      env:
+        PROJECT_PATH: ${{ inputs.project-path }}
+        RESULTS_PREFIX: ${{ inputs.test-results-name-prefix }}
+        FILTER_CRITERIA: ${{ inputs.test-filter-criteria }}
+        CONFIGURATION: ${{ inputs.configuration }}
+        NO_BUILD: ${{ inputs.no-build }}
+      run: |
+        echo "::group::dotnet test (${RESULTS_PREFIX})"
+        FILTER_ARG=()
+        if [ -n "$FILTER_CRITERIA" ]; then
+          FILTER_ARG=(--filter "$FILTER_CRITERIA")
+        fi
+        NB_ARG=()
+        if [ "$NO_BUILD" = "true" ]; then
+          NB_ARG=(--no-build --no-restore)
+          # upload-artifact strips the exec bit — restore it on apphost binaries
+          find . -type f -path '*/bin/*' ! -name '*.*' -exec chmod +x {} + 2>/dev/null || true
+        fi
+        dotnet test "$PROJECT_PATH" \
+          --configuration "$CONFIGURATION" \
+          "${NB_ARG[@]}" \
+          --logger "trx;LogFileName=${RESULTS_PREFIX}.trx" \
+          --results-directory "TestResults/${RESULTS_PREFIX}" \
+          "${FILTER_ARG[@]}"
+        echo "::endgroup::"
+        echo "::notice title=Tests passed::${RESULTS_PREFIX}"
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: test_results_${{ inputs.test-results-name-prefix }}
+        path: TestResults/${{ inputs.test-results-name-prefix }}
+        retention-days: 1
