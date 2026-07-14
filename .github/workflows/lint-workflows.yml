@@ -1,0 +1,82 @@
+name: Lint Workflows (Reusable)
+
+# Shared actionlint + zizmor + deprecated-command gate for GitHub Actions
+# workflows. Repo-specific extras (yamllint configs, etc.) stay in the caller
+# as sibling jobs.
+#
+# Required caller permissions:
+#   contents: read
+#   checks: write
+
+on:
+  workflow_call:
+    inputs:
+      zizmor-paths:
+        description: "Space-separated paths scanned by zizmor and the deprecated-command grep."
+        required: false
+        type: string
+        default: ".github/workflows/"
+      zizmor-version:
+        description: "zizmor version installed via pipx."
+        required: false
+        type: string
+        default: "1.26.1"
+      zizmor-args:
+        description: "Extra zizmor arguments, e.g. '--offline --min-severity high'."
+        required: false
+        type: string
+        default: ""
+      zizmor-enforce:
+        description: "When false, zizmor findings are reported but do not fail the job."
+        required: false
+        type: boolean
+        default: true
+      actionlint-fail-level:
+        description: "reviewdog fail_level for actionlint."
+        required: false
+        type: string
+        default: "error"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: actionlint + zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Run actionlint
+        uses: reviewdog/action-actionlint@6fb7acc99f4a1008869fa8a0f09cfca740837d9d  # v1.72.0
+        with:
+          fail_level: ${{ inputs.actionlint-fail-level }}
+          reporter: github-check
+      - name: Zizmor (Actions security scan)
+        continue-on-error: ${{ !inputs.zizmor-enforce }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZIZMOR_VERSION: ${{ inputs.zizmor-version }}
+          ZIZMOR_ARGS: ${{ inputs.zizmor-args }}
+          ZIZMOR_PATHS: ${{ inputs.zizmor-paths }}
+        run: |
+          read -ra args <<< "$ZIZMOR_ARGS"
+          read -ra paths <<< "$ZIZMOR_PATHS"
+          pipx run "zizmor==${ZIZMOR_VERSION}" --format plain "${args[@]}" "${paths[@]}"
+      - name: Check for deprecated workflow commands
+        shell: bash
+        env:
+          SCAN_PATHS: ${{ inputs.zizmor-paths }}
+        run: |
+          read -ra paths <<< "$SCAN_PATHS"
+          if grep -rnE '::set-(output|env)::' "${paths[@]}"; then
+            echo "::error title=Deprecated commands::Use \$GITHUB_OUTPUT / \$GITHUB_ENV instead of ::set-output / ::set-env"
+            exit 1
+          fi
+          echo "::notice title=Lint::No deprecated workflow commands found"

@@ -19,29 +19,9 @@ permissions:
 jobs:
   lint:
     name: Lint Workflows & Actions
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
     permissions:
       contents: read
       checks: write
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          persist-credentials: false
-      - name: Run actionlint
-        uses: reviewdog/action-actionlint@6fb7acc99f4a1008869fa8a0f09cfca740837d9d  # v1.72.0
-        with:
-          fail_level: error
-          reporter: github-check
-      - name: Zizmor (Actions security scan)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pipx run zizmor==1.26.1 --format plain .github/workflows/ actions/
-      - name: Check for deprecated workflow commands
-        shell: bash
-        run: |
-          if grep -rnE '::set-(output|env)::' .github/workflows/ actions/ examples/; then
-            echo "::error title=Deprecated commands::Use \$GITHUB_OUTPUT / \$GITHUB_ENV instead of ::set-output / ::set-env"
-            exit 1
-          fi
-          echo "::notice title=Lint::No deprecated workflow commands found"
+    uses: ./.github/workflows/lint-workflows.yml
+    with:
+      zizmor-paths: ".github/workflows/ actions/ examples/"
