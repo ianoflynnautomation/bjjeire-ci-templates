@@ -39,8 +39,9 @@ runs:
         NB_ARG=()
         if [ "$NO_BUILD" = "true" ]; then
           NB_ARG=(--no-build --no-restore)
-          # upload-artifact strips the exec bit — restore it on apphost binaries
-          find . -type f -path '*/bin/*' ! -name '*.*' -exec chmod +x {} + 2>/dev/null || true
+          # upload-artifact strips the exec bit; apphost binary names often
+          # contain dots (e.g. My.Project.Tests), so chmod everything under bin
+          find . -type f -path '*/bin/*' -exec chmod +x {} + 2>/dev/null || true
         fi
         dotnet test "$PROJECT_PATH" \
           --configuration "$CONFIGURATION" \

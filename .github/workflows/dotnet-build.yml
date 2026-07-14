@@ -198,8 +198,9 @@ jobs:
           if [ -n "$FILTER_CRITERIA" ]; then
             FILTER_ARG=(--filter "$FILTER_CRITERIA")
           fi
-          # upload-artifact strips the exec bit — restore it on apphost binaries
-          find . -type f -path '*/bin/*' ! -name '*.*' -exec chmod +x {} + 2>/dev/null || true
+          # upload-artifact strips the exec bit; apphost binary names often
+          # contain dots (e.g. My.Project.Tests), so chmod everything under bin
+          find . -type f -path '*/bin/*' -exec chmod +x {} + 2>/dev/null || true
           dotnet test "$PROJECT_PATH" \
             --configuration "$CONFIGURATION" \
             --no-build --no-restore \
