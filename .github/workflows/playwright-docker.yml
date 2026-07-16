@@ -188,7 +188,7 @@ jobs:
       image_ref: ${{ steps.image.outputs.ref }}
     steps:
       - name: Checkout test repo
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           repository: ${{ inputs.test_repo }}
           ref: ${{ inputs.test_repo_ref }}
@@ -211,7 +211,7 @@ jobs:
           echo "::notice title=Runner image::${ref}"
 
       - name: Login to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -232,11 +232,11 @@ jobs:
 
       - name: Set up Docker Buildx
         if: steps.check.outputs.exists == 'false'
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Build and push
         if: steps.check.outputs.exists == 'false'
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: Dockerfile
@@ -282,12 +282,12 @@ jobs:
       COMPOSE_PROJECT_NAME: bjj-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard.name }}-${{ matrix.shard.shard }}
     steps:
       - name: Checkout caller repo (compose sources)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
 
       - name: Login to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -439,7 +439,7 @@ jobs:
 
       - name: Upload blob report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: blob-report-${{ matrix.shard.name }}-shard-${{ matrix.shard.shard }}-docker
           path: pw-out/blob-report/
@@ -449,7 +449,7 @@ jobs:
 
       - name: Upload traces
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: traces-${{ matrix.shard.name }}-shard-${{ matrix.shard.shard }}-docker
           path: pw-out/test-results/**/*.zip
@@ -501,7 +501,7 @@ jobs:
       # native GitHub REST API via actions/github-script. Idempotency comes
       # from a hidden HTML marker in the comment body.
       - name: Upsert PR comment
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           STATUS: ${{ needs.report.outputs.status }}
           FAILED: ${{ needs.report.outputs.failed_count }}
