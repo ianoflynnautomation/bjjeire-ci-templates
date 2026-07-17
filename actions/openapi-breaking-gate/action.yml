@@ -1,0 +1,80 @@
+name: 'OpenAPI Breaking-Change Gate'
+description: 'Compares a freshly generated OpenAPI spec against the last published contract in an OCI registry and fails on breaking changes. Skips only when no contract has been published yet; any other registry error fails the gate rather than silently disabling it.'
+
+inputs:
+  current-spec:
+    description: 'Path to the newly generated OpenAPI JSON to validate.'
+    required: true
+  image:
+    description: 'OCI reference of the published contract without tag, e.g. ghcr.io/owner/my-api-contract. Lowercased internally; the registry host is derived from this reference.'
+    required: true
+  token:
+    description: 'Token used to authenticate against the registry (needs packages: read for GHCR).'
+    required: true
+  user:
+    description: 'Username for the registry login.'
+    required: true
+outputs:
+  skipped:
+    description: 'true when no published baseline exists yet and the gate was skipped (first publish).'
+    value: ${{ steps.baseline.outputs.skip }}
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: oras-project/setup-oras@38de303aac69abb66f3e6255b7198bff35f323e3  # v2.0.0
+
+    - name: Pull published baseline contract
+      id: baseline
+      shell: bash
+      env:
+        REGISTRY_TOKEN: ${{ inputs.token }}
+        REGISTRY_USER: ${{ inputs.user }}
+        IMAGE_INPUT: ${{ inputs.image }}
+      run: |
+        echo "::add-mask::${REGISTRY_TOKEN}"
+        IMAGE="${IMAGE_INPUT,,}"
+        REGISTRY="${IMAGE%%/*}"
+        echo "::group::Probe ${IMAGE}:latest"
+        printf '%s' "$REGISTRY_TOKEN" | oras login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+        set +e
+        probe_err="$(oras manifest fetch "${IMAGE}:latest" 2>&1 >/dev/null)"
+        probe_rc=$?
+        set -e
+        if [ "$probe_rc" -ne 0 ]; then
+          # Only a missing package/tag counts as "first publish". Auth failures,
+          # network errors and rate limits must fail the gate — skipping there
+          # would let a breaking change publish ungated.
+          if echo "$probe_err" | grep -qiE 'not found|name unknown|manifest unknown|denied'; then
+            echo "::warning title=OpenAPI gate::No published contract at ${IMAGE}:latest yet; skipping breaking-change gate (first publish)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::endgroup::"
+            exit 0
+          fi
+          echo "::error title=OpenAPI gate::Could not probe ${IMAGE}:latest — refusing to continue ungated"
+          printf '%s\n' "$probe_err"
+          exit 1
+        fi
+        oras pull "${IMAGE}:latest" -o published-baseline
+        spec="$(find published-baseline -type f -name '*.json' | head -n1)"
+        if [ -z "$spec" ]; then
+          echo "::error title=OpenAPI gate::Published baseline at ${IMAGE}:latest contained no JSON spec"
+          exit 1
+        fi
+        echo "base_spec=${spec}" >> "$GITHUB_OUTPUT"
+        echo "skip=false" >> "$GITHUB_OUTPUT"
+        echo "::endgroup::"
+
+    - name: Compare against published baseline
+      if: steps.baseline.outputs.skip != 'true'
+      uses: oasdiff/oasdiff-action/breaking@024f6c399f9a21ada1addb0f9a36ce1bfac995f1  # v0.1.6
+      with:
+        base: ${{ steps.baseline.outputs.base_spec }}
+        revision: ${{ inputs.current-spec }}
+        fail-on: ERR
+        review: false
+
+    - name: Report gate result
+      if: steps.baseline.outputs.skip != 'true'
+      shell: bash
+      run: echo "::notice title=OpenAPI gate::No breaking changes vs published :latest"

@@ -1,0 +1,30 @@
+# Example caller: weekly artifact/cache/run cleanup.
+# Copy into your repo as .github/workflows/cleanup-artifacts.yml.
+name: Cleanup Artifacts
+
+on:
+  schedule:
+    - cron: "0 3 * * 0" # Every Sunday at 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print what would be deleted without deleting"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: Cleanup
+    permissions:
+      actions: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/cleanup-artifacts.yml@v1
+    with:
+      retention-days: 30
+      dry-run: ${{ (github.event.inputs.dry_run || 'false') == 'true' }}
