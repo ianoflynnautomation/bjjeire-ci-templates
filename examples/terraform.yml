@@ -33,7 +33,7 @@ jobs:
         resource_group_name=rg-tfstate
         storage_account_name=sttfstate
         container_name=tfstate
-        key=bjjeire.tfstate
+        key=myapp.tfstate
       var-file: environments/production.tfvars
       plan-artifact-name: tfplan-production
     secrets:
@@ -56,7 +56,7 @@ jobs:
         resource_group_name=rg-tfstate
         storage_account_name=sttfstate
         container_name=tfstate
-        key=bjjeire.tfstate
+        key=myapp.tfstate
       environment: production
       plan-artifact-name: tfplan-production
     secrets:

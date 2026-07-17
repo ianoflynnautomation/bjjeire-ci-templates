@@ -20,15 +20,13 @@ jobs:
       contents: read
     uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/dotnet-build.yml@v1
     with:
-      solution-path: BjjEire.sln
+      solution-path: MyApp.sln
       configuration: Release
       container-image: mcr.microsoft.com/dotnet/sdk:10.0
       run-format-check: true
       format-include: ./src/
-      format-exclude: ./src/BjjEire.Aspire.AppHost/
-      test-projects: >-
-        [
-          {"name":"ApiUnitTests","project":"tests/BjjEire.Api.UnitTests/BjjEire.Api.UnitTests.csproj","filter":"Category!=Ignore"},
-          {"name":"DomainUnitTests","project":"tests/BjjEire.Domain.UnitTests/BjjEire.Domain.UnitTests.csproj","filter":"Category!=Ignore"},
-          {"name":"ApplicationUnitTests","project":"tests/BjjEire.Application.UnitTests/BjjEire.Application.UnitTests.csproj","filter":"Category!=Ignore"}
-        ]
+      test-filter: "Category!=Ignore"
+      test-projects: |
+        tests/MyApp.Domain.UnitTests/MyApp.Domain.UnitTests.csproj
+        tests/MyApp.Api.UnitTests/MyApp.Api.UnitTests.csproj
+        tests/MyApp.Api.IntegrationTests/MyApp.Api.IntegrationTests.csproj

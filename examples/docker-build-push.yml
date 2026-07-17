@@ -1,4 +1,4 @@
-# Example caller: build + push an image to GHCR on main, build-only on PRs.
+# Example caller: build + push images to GHCR on main, build-only on PRs.
 # Copy into your repo as .github/workflows/build-push.yml and adjust paths.
 name: Build & Push Images
 
@@ -29,13 +29,12 @@ jobs:
       security-events: write
     uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/docker-build-push.yml@v1
     with:
-      image-name: bjjeire-api
-      dockerfile: ./src/BjjEire.Api/Dockerfile
+      image-name: my-api
+      dockerfile: ./src/MyApp.Api/Dockerfile
       push: ${{ github.event_name != 'pull_request' }}
       labels: |
-        org.opencontainers.image.title=bjjeire-api
-        org.opencontainers.image.vendor=BjjEire
-        org.opencontainers.image.licenses=MIT
+        org.opencontainers.image.title=my-api
+        org.opencontainers.image.vendor=MyCompany
 
   frontend-image:
     name: Frontend Image
@@ -47,11 +46,11 @@ jobs:
       security-events: write
     uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/docker-build-push.yml@v1
     with:
-      image-name: bjjeire-frontend
-      dockerfile: ./src/bjjeire-app/Dockerfile
+      image-name: my-frontend
+      dockerfile: ./src/my-app/Dockerfile
       push: ${{ github.event_name != 'pull_request' }}
     secrets:
       # Public config baked into the SPA bundle — never real credentials.
       SECRET_BUILD_ARGS: |
-        VITE_APP_MSAL_CLIENT_ID=${{ secrets.VITE_APP_MSAL_CLIENT_ID }}
-        VITE_APP_URL=${{ secrets.VITE_APP_URL }}
+        VITE_APP_URL=${{ secrets.APP_URL }}
+        VITE_ANALYTICS_TOKEN=${{ secrets.ANALYTICS_TOKEN }}

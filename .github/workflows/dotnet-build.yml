@@ -44,12 +44,17 @@ on:
         default: ""
       test-projects:
         description: >-
-          JSON array of test projects run as a matrix against the pre-built output.
-          Each item: {"name": "<artifact-safe name>", "project": "<path to .csproj>",
-          "filter": "<optional dotnet test --filter>"}. Empty array skips testing.
+          Newline-separated .csproj paths run as a matrix against the pre-built
+          output. The matrix name is the csproj filename without extension.
+          Empty skips testing.
         required: false
         type: string
-        default: "[]"
+        default: ""
+      test-filter:
+        description: "dotnet test --filter applied to every test project (empty = no filter)."
+        required: false
+        type: string
+        default: ""
       build-artifact-name:
         description: "Artifact name for the build output shared with the test matrix."
         required: false
@@ -118,7 +123,19 @@ jobs:
     timeout-minutes: 15
     outputs:
       build_successful: ${{ steps.build_step.outcome == 'success' }}
+      test_matrix: ${{ steps.plan.outputs.matrix }}
     steps:
+      - name: Plan test matrix
+        id: plan
+        shell: bash
+        env:
+          TEST_PROJECTS: ${{ inputs.test-projects }}
+        run: |
+          matrix=$(printf '%s\n' "$TEST_PROJECTS" | jq -R -n -c \
+            '[inputs | gsub("^\\s+|\\s+$"; "") | select(length > 0)
+              | {project: ., name: (split("/") | last | sub("\\.csproj$"; ""))}]')
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Test matrix::$(echo "$matrix" | jq 'length') project(s) planned"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
@@ -149,7 +166,7 @@ jobs:
           echo "::endgroup::"
           echo "::notice title=Build .NET::Solution built successfully ($CONFIGURATION)"
       - name: Upload build output
-        if: inputs.test-projects != '[]'
+        if: inputs.test-projects != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ inputs.build-artifact-name }}
@@ -163,12 +180,12 @@ jobs:
     container:
       image: ${{ inputs.container-image }}
     needs: build
-    if: inputs.test-projects != '[]'
+    if: inputs.test-projects != ''
     timeout-minutes: 30
     strategy:
       fail-fast: true
       matrix:
-        include: ${{ fromJSON(inputs.test-projects) }}
+        include: ${{ fromJSON(needs.build.outputs.test_matrix) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -190,7 +207,7 @@ jobs:
         env:
           PROJECT_PATH: ${{ matrix.project }}
           RESULTS_PREFIX: ${{ matrix.name }}
-          FILTER_CRITERIA: ${{ matrix.filter }}
+          FILTER_CRITERIA: ${{ inputs.test-filter }}
           CONFIGURATION: ${{ inputs.configuration }}
         run: |
           echo "::group::dotnet test (${RESULTS_PREFIX})"
