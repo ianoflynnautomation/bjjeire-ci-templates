@@ -19,6 +19,18 @@ inputs:
     description: 'Run against pre-built output (appends --no-build --no-restore). Requires bin/obj to be present, e.g. downloaded from a build artifact.'
     required: false
     default: 'false'
+  verbosity:
+    description: 'dotnet CLI verbosity (quiet, minimal, normal, detailed, diagnostic).'
+    required: false
+    default: 'minimal'
+  extra-arguments:
+    description: 'Extra arguments appended to `dotnet test` (shell-split).'
+    required: false
+    default: ''
+  artifact-retention-days:
+    description: 'Retention days for the TRX artifact.'
+    required: false
+    default: '1'
 runs:
   using: "composite"
   steps:
@@ -30,7 +42,10 @@ runs:
         FILTER_CRITERIA: ${{ inputs.test-filter-criteria }}
         CONFIGURATION: ${{ inputs.configuration }}
         NO_BUILD: ${{ inputs.no-build }}
+        VERBOSITY: ${{ inputs.verbosity }}
+        EXTRA_ARGUMENTS: ${{ inputs.extra-arguments }}
       run: |
+        set -euo pipefail
         echo "::group::dotnet test (${RESULTS_PREFIX})"
         FILTER_ARG=()
         if [ -n "$FILTER_CRITERIA" ]; then
@@ -43,12 +58,18 @@ runs:
           # contain dots (e.g. My.Project.Tests), so chmod everything under bin
           find . -type f -path '*/bin/*' -exec chmod +x {} + 2>/dev/null || true
         fi
+        EXTRA=()
+        if [ -n "$EXTRA_ARGUMENTS" ]; then
+          read -r -a EXTRA <<< "$EXTRA_ARGUMENTS"
+        fi
         dotnet test "$PROJECT_PATH" \
           --configuration "$CONFIGURATION" \
+          --verbosity "$VERBOSITY" \
           "${NB_ARG[@]}" \
           --logger "trx;LogFileName=${RESULTS_PREFIX}.trx" \
           --results-directory "TestResults/${RESULTS_PREFIX}" \
-          "${FILTER_ARG[@]}"
+          "${FILTER_ARG[@]}" \
+          "${EXTRA[@]}"
         echo "::endgroup::"
         echo "::notice title=Tests passed::${RESULTS_PREFIX}"
 
@@ -58,4 +79,4 @@ runs:
       with:
         name: test_results_${{ inputs.test-results-name-prefix }}
         path: TestResults/${{ inputs.test-results-name-prefix }}
-        retention-days: 1
+        retention-days: ${{ inputs.artifact-retention-days }}

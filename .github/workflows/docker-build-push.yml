@@ -19,7 +19,7 @@ on:
   workflow_call:
     inputs:
       image-name:
-        description: "Short image name, e.g. `my-api`. Combined with registry + lowercased repository owner."
+        description: "Short image name, e.g. `my-api`. Combined with registry + image-namespace."
         required: true
         type: string
       registry:
@@ -27,6 +27,11 @@ on:
         required: false
         type: string
         default: "ghcr.io"
+      image-namespace:
+        description: "Registry namespace/org (lowercased). Empty = github.repository_owner."
+        required: false
+        type: string
+        default: ""
       dockerfile:
         description: "Path to the Dockerfile relative to the repo root."
         required: true
@@ -36,6 +41,11 @@ on:
         required: false
         type: string
         default: "."
+      target:
+        description: "Optional multi-stage Dockerfile target."
+        required: false
+        type: string
+        default: ""
       platforms:
         description: "Comma-separated buildx platforms."
         required: false
@@ -61,6 +71,21 @@ on:
         required: false
         type: boolean
         default: true
+      trivy-severity:
+        description: "Comma-separated Trivy severities to report."
+        required: false
+        type: string
+        default: "HIGH,CRITICAL"
+      trivy-ignore-unfixed:
+        description: "Ignore vulnerabilities with no fix available."
+        required: false
+        type: boolean
+        default: true
+      trivy-exit-code:
+        description: "Trivy process exit code on findings (0 = report only; 1 = fail the job)."
+        required: false
+        type: string
+        default: "0"
       tags:
         description: "Multi-line input passed verbatim to docker/metadata-action tags."
         required: false
@@ -85,6 +110,21 @@ on:
         required: false
         type: string
         default: ""
+      cache-fallback-scope:
+        description: "Secondary cache-from scope used as a warm baseline (default `<image-name>-main`)."
+        required: false
+        type: string
+        default: ""
+      runs-on:
+        description: "Runner label for build and scan jobs."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      fetch-depth:
+        description: "actions/checkout fetch-depth (0 = full history for metadata labels)."
+        required: false
+        type: number
+        default: 0
     secrets:
       SECRET_BUILD_ARGS:
         description: >-
@@ -115,7 +155,7 @@ permissions:
 jobs:
   build-push:
     name: Build & Push ${{ inputs.image-name }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -129,7 +169,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ inputs.fetch-depth }}
           persist-credentials: false
 
       - name: Resolve image reference
@@ -138,17 +178,24 @@ jobs:
         env:
           REGISTRY: ${{ inputs.registry }}
           OWNER: ${{ github.repository_owner }}
+          IMAGE_NAMESPACE: ${{ inputs.image-namespace }}
           IMAGE_NAME: ${{ inputs.image-name }}
           CACHE_SCOPE: ${{ inputs.cache-scope }}
+          CACHE_FALLBACK: ${{ inputs.cache-fallback-scope }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          ref="${REGISTRY}/${OWNER,,}/${IMAGE_NAME}"
+          set -euo pipefail
+          ns="${IMAGE_NAMESPACE:-$OWNER}"
+          ns="${ns,,}"
+          ref="${REGISTRY}/${ns}/${IMAGE_NAME}"
           scope="${CACHE_SCOPE:-${IMAGE_NAME}-${REF_NAME}}"
+          fallback="${CACHE_FALLBACK:-${IMAGE_NAME}-main}"
           {
             echo "ref=${ref}"
             echo "cache_scope=${scope}"
+            echo "cache_fallback=${fallback}"
           } >> "$GITHUB_OUTPUT"
-          echo "::notice title=Image::${ref} (cache scope: ${scope})"
+          echo "::notice title=Image::${ref} (cache scope: ${scope}, fallback: ${fallback})"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4.2.0
@@ -158,7 +205,25 @@ jobs:
         with:
           driver: docker-container
 
+      # Login when pushing, or when custom registry credentials are supplied
+      # (private base images on build-only PR runs). secrets.* is not legal in
+      # step `if:`; resolve via env instead.
+      - name: Resolve registry login
+        id: reglogin
+        shell: bash
+        env:
+          PUSH: ${{ inputs.push }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ "$PUSH" = "true" ] || [ -n "${REGISTRY_PASSWORD}" ]; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Login to registry
+        if: steps.reglogin.outputs.needed == 'true'
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
         with:
           registry: ${{ inputs.registry }}
@@ -181,6 +246,7 @@ jobs:
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
+          target: ${{ inputs.target }}
           platforms: ${{ inputs.platforms }}
           push: ${{ inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -194,7 +260,7 @@ jobs:
             ${{ secrets.SECRET_BUILD_ARGS }}
           cache-from: |
             type=gha,scope=${{ steps.image.outputs.cache_scope }}
-            type=gha,scope=${{ inputs.image-name }}-main
+            type=gha,scope=${{ steps.image.outputs.cache_fallback }}
           cache-to: type=gha,scope=${{ steps.image.outputs.cache_scope }},mode=max
 
       - name: Attest build provenance
@@ -215,6 +281,7 @@ jobs:
         env:
           IMAGE_REF: ${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}
         run: |
+          set -euo pipefail
           echo "::group::cosign sign (keyless)"
           cosign sign --yes "$IMAGE_REF"
           echo "::endgroup::"
@@ -228,6 +295,7 @@ jobs:
           TAG: ${{ steps.meta.outputs.version }}
           DIGEST: ${{ steps.build.outputs.digest }}
           PUSHED: ${{ inputs.push }}
+          PLATFORMS: ${{ inputs.platforms }}
         run: |
           echo "::notice title=Image built::${IMAGE}:${TAG} digest=${DIGEST} pushed=${PUSHED}"
           {
@@ -237,14 +305,15 @@ jobs:
             echo "| --- | --- |"
             echo "| Tag | \`${TAG}\` |"
             echo "| Digest | \`${DIGEST}\` |"
+            echo "| Platforms | \`${PLATFORMS}\` |"
             echo "| Pushed | ${PUSHED} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   scan:
     name: Scan Image (Trivy)
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     needs: build-push
-    if: inputs.scan && inputs.push && needs.build-push.outputs.image_tag != ''
+    if: inputs.scan && inputs.push && needs.build-push.outputs.image_digest != ''
     timeout-minutes: 15
     permissions:
       contents: read
@@ -261,8 +330,9 @@ jobs:
       - name: Warm Docker daemon (surface registry errors before scan)
         shell: bash
         env:
-          IMAGE_REF: ${{ needs.build-push.outputs.image_ref }}:${{ needs.build-push.outputs.image_tag }}
+          IMAGE_REF: ${{ needs.build-push.outputs.image_ref }}@${{ needs.build-push.outputs.image_digest }}
         run: |
+          set -euo pipefail
           for i in 1 2 3; do
             if docker pull "$IMAGE_REF"; then
               exit 0
@@ -276,14 +346,16 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
-          image-ref: ${{ needs.build-push.outputs.image_ref }}:${{ needs.build-push.outputs.image_tag }}
+          # Prefer digest over mutable tags for an immutable scan subject.
+          image-ref: ${{ needs.build-push.outputs.image_ref }}@${{ needs.build-push.outputs.image_digest }}
           format: sarif
           output: trivy-${{ inputs.image-name }}.sarif
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: 0
+          severity: ${{ inputs.trivy-severity }}
+          ignore-unfixed: ${{ inputs.trivy-ignore-unfixed }}
+          exit-code: ${{ inputs.trivy-exit-code }}
 
       - name: Upload Trivy SARIF to GitHub code scanning
+        if: always() && hashFiles(format('trivy-{0}.sarif', inputs.image-name)) != ''
         uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
         with:
           sarif_file: trivy-${{ inputs.image-name }}.sarif
@@ -294,11 +366,15 @@ jobs:
         shell: bash
         env:
           IMAGE_NAME: ${{ inputs.image-name }}
-          IMAGE_REF: ${{ needs.build-push.outputs.image_ref }}:${{ needs.build-push.outputs.image_tag }}
+          IMAGE_REF: ${{ needs.build-push.outputs.image_ref }}@${{ needs.build-push.outputs.image_digest }}
+          SEVERITY: ${{ inputs.trivy-severity }}
+          EXIT_CODE: ${{ inputs.trivy-exit-code }}
         run: |
           {
             echo "### Trivy scan — ${IMAGE_NAME}"
             echo ""
             echo "- Image: \`${IMAGE_REF}\`"
+            echo "- Severity: \`${SEVERITY}\`"
+            echo "- Exit code on findings: \`${EXIT_CODE}\`"
             echo "- Findings uploaded to **Security → Code scanning → trivy-${IMAGE_NAME}**"
           } >> "$GITHUB_STEP_SUMMARY"

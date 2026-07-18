@@ -28,6 +28,8 @@ jobs:
       run-format-check: true
       format-include: ./src/
       test-filter: "Category!=Ignore"
+      test-fail-fast: true
+      verbosity: minimal
       test-projects: |
         tests/MyApp.Domain.UnitTests/MyApp.Domain.UnitTests.csproj
         tests/MyApp.Api.UnitTests/MyApp.Api.UnitTests.csproj

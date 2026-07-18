@@ -17,10 +17,12 @@ on:
         type: string
         default: "."
       terraform-version:
-        description: "Terraform CLI version constraint passed to hashicorp/setup-terraform."
+        description: >-
+          Terraform CLI version constraint passed to hashicorp/setup-terraform.
+          Prefer a pinned version (e.g. 1.10.5) over `latest` for reproducibility.
         required: false
         type: string
-        default: "latest"
+        default: "1.10.5"
       backend-config:
         description: "Multi-line `key=value` pairs, each passed to `terraform init -backend-config=` (must match the plan job)."
         required: false
@@ -28,6 +30,11 @@ on:
         default: ""
       workspace:
         description: "Optional Terraform workspace to select (must match the plan job)."
+        required: false
+        type: string
+        default: ""
+      init-args:
+        description: "Extra arguments appended to `terraform init` (after backend-config flags)."
         required: false
         type: string
         default: ""
@@ -40,6 +47,21 @@ on:
         required: false
         type: string
         default: "tfplan"
+      runs-on:
+        description: "Runner label for the apply job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      tf-log:
+        description: "Optional TF_LOG level (TRACE, DEBUG, INFO, WARN, ERROR). Empty = default."
+        required: false
+        type: string
+        default: ""
+      plugin-cache:
+        description: "Cache the Terraform plugin directory between runs."
+        required: false
+        type: boolean
+        default: true
     secrets:
       ARM_CLIENT_ID:
         description: "Azure AD app (workload identity) client ID for OIDC auth."
@@ -57,7 +79,7 @@ permissions:
 jobs:
   apply:
     name: Apply
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 60
     environment: ${{ inputs.environment }}
     permissions:
@@ -73,6 +95,7 @@ jobs:
       ARM_USE_OIDC: "true"
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
+      TF_LOG: ${{ inputs.tf-log }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -81,42 +104,82 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform-version }}
           terraform_wrapper: false
+      - name: Prepare plugin cache directory
+        if: inputs.plugin-cache
+        shell: bash
+        run: mkdir -p "$HOME/.terraform.d/plugin-cache"
+      - name: Cache Terraform plugins
+        if: inputs.plugin-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: ${{ runner.os }}-tfplugins-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', inputs.working-directory)) }}
+          restore-keys: |
+            ${{ runner.os }}-tfplugins-${{ inputs.terraform-version }}-
+            ${{ runner.os }}-tfplugins-
+      - name: Configure plugin cache
+        if: inputs.plugin-cache
+        shell: bash
+        run: echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> "$GITHUB_ENV"
       - name: Download plan artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: ${{ inputs.plan-artifact-name }}
           path: ${{ inputs.working-directory }}
+      - name: Verify plan artifact
+        shell: bash
+        env:
+          PLAN_PATH: ${{ inputs.working-directory }}/tfplan
+        run: |
+          set -euo pipefail
+          if [ ! -f "$PLAN_PATH" ]; then
+            echo "::error title=Terraform apply::Plan artifact missing at ${PLAN_PATH}"
+            exit 1
+          fi
+          size=$(wc -c < "$PLAN_PATH" | tr -d ' ')
+          echo "::notice title=Terraform apply::Plan artifact present (${size} bytes)"
       - name: Terraform init
         shell: bash
         env:
           BACKEND_CONFIG: ${{ inputs.backend-config }}
+          INIT_ARGS: ${{ inputs.init-args }}
         run: |
+          set -euo pipefail
           echo "::group::terraform init"
           BACKEND_ARGS=()
           while IFS= read -r line; do
             [ -n "$line" ] && BACKEND_ARGS+=("-backend-config=${line}")
           done <<< "$BACKEND_CONFIG"
-          terraform init "${BACKEND_ARGS[@]}"
+          EXTRA=()
+          if [ -n "$INIT_ARGS" ]; then
+            read -r -a EXTRA <<< "$INIT_ARGS"
+          fi
+          terraform init "${BACKEND_ARGS[@]}" "${EXTRA[@]}"
           echo "::endgroup::"
       - name: Select workspace
         if: inputs.workspace != ''
         shell: bash
         env:
           TF_WORKSPACE_NAME: ${{ inputs.workspace }}
+        # Do not -or-create on apply: the plan job must have created it already.
         run: terraform workspace select "$TF_WORKSPACE_NAME"
       - name: Terraform apply
         shell: bash
+        env:
+          PLAN_ARTIFACT: ${{ inputs.plan-artifact-name }}
         run: |
+          set -euo pipefail
           echo "::group::terraform apply"
           terraform apply -auto-approve tfplan
           echo "::endgroup::"
-          echo "::notice title=Terraform apply::Applied plan from artifact '${{ inputs.plan-artifact-name }}'"
+          echo "::notice title=Terraform apply::Applied plan from artifact '${PLAN_ARTIFACT}'"
       - name: Write apply summary
         if: always()
         shell: bash
         env:
           ENVIRONMENT: ${{ inputs.environment }}
           WORKDIR: ${{ inputs.working-directory }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           {
             echo "### Terraform apply"
@@ -125,5 +188,5 @@ jobs:
             echo "| --- | --- |"
             echo "| Environment | \`${ENVIRONMENT}\` |"
             echo "| Module | \`${WORKDIR}\` |"
-            echo "| Result | ${{ job.status }} |"
+            echo "| Result | ${JOB_STATUS} |"
           } >> "$GITHUB_STEP_SUMMARY"

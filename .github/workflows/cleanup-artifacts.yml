@@ -1,11 +1,15 @@
 name: Cleanup Artifacts (Reusable)
 
-# Deletes all artifacts and caches, plus completed workflow runs older than the
+# Deletes artifacts, caches, and/or completed workflow runs older than the
 # retention window (runs on the protected branch are kept as an audit trail).
 # Callers provide the schedule; this workflow provides the logic.
 #
 # Required caller permissions:
 #   actions: write
+#
+# Recommendation: set delete-caches: false unless you intentionally want to
+# wipe CI caches (they are expensive to rebuild). Artifacts and non-default
+# branch runs are usually safe to prune.
 
 on:
   workflow_call:
@@ -25,6 +29,33 @@ on:
         required: false
         type: string
         default: ""
+      delete-artifacts:
+        description: "Delete repository artifacts."
+        required: false
+        type: boolean
+        default: true
+      delete-caches:
+        description: "Delete repository Actions caches. Prefer false — caches are expensive to rebuild."
+        required: false
+        type: boolean
+        default: false
+      delete-workflow-runs:
+        description: "Delete completed workflow runs older than retention-days (except protected branch)."
+        required: false
+        type: boolean
+        default: true
+      artifact-retention-days:
+        description: >-
+          Only delete artifacts older than this many days. 0 = delete all artifacts
+          (previous behaviour).
+        required: false
+        type: number
+        default: 7
+      runs-on:
+        description: "Runner label for the cleanup job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
 
 permissions:
   contents: read
@@ -32,32 +63,43 @@ permissions:
 jobs:
   cleanup:
     name: Delete Expired Artifacts, Caches and Workflow Runs
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
     permissions:
       actions: write
     steps:
-      - name: Delete all artifacts
+      - name: Delete artifacts
+        if: inputs.delete-artifacts
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           DRY_RUN: ${{ inputs.dry-run }}
+          ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact-retention-days }}
         with:
           script: |
             const dryRun = process.env.DRY_RUN === "true";
+            const retentionDays = parseInt(process.env.ARTIFACT_RETENTION_DAYS, 10);
+            const cutoff = retentionDays > 0
+              ? new Date(Date.now() - retentionDays * 86400 * 1000)
+              : null;
+
             core.startGroup("List artifacts");
             const artifacts = await github.paginate(
               github.rest.actions.listArtifactsForRepo,
               { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 },
             );
-            core.info(`Found ${artifacts.length} artifact(s)`);
+            const candidates = cutoff
+              ? artifacts.filter((a) => new Date(a.created_at) < cutoff)
+              : artifacts;
+            core.info(`Found ${artifacts.length} artifact(s); eligible: ${candidates.length}`);
+            if (cutoff) core.info(`Artifact cutoff: ${cutoff.toISOString()} (${retentionDays} day(s))`);
             core.endGroup();
 
             let deleted = 0;
             let failed = 0;
             core.startGroup(dryRun ? "Dry-run — artifacts that would be deleted" : "Delete artifacts");
-            for (const a of artifacts) {
+            for (const a of candidates) {
               if (dryRun) {
-                core.info(`${a.id}  ${a.name}`);
+                core.info(`${a.id}  ${a.name}  created=${a.created_at}`);
                 continue;
               }
               try {
@@ -74,11 +116,21 @@ jobs:
             }
             core.endGroup();
 
-            const outcome = dryRun ? `${artifacts.length} would be deleted` : `${deleted} deleted, ${failed} failed`;
+            const outcome = dryRun
+              ? `${candidates.length} would be deleted`
+              : `${deleted} deleted, ${failed} failed`;
             core.notice(`Artifact cleanup: ${outcome}`, { title: "Artifact cleanup" });
             core.exportVariable("ARTIFACTS_OUTCOME", outcome);
 
-      - name: Delete all caches
+      - name: Skip artifact cleanup
+        if: ${{ !inputs.delete-artifacts }}
+        shell: bash
+        run: |
+          echo "ARTIFACTS_OUTCOME=skipped" >> "$GITHUB_ENV"
+          echo "::notice title=Artifact cleanup::Skipped (delete-artifacts=false)"
+
+      - name: Delete caches
+        if: inputs.delete-caches
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           DRY_RUN: ${{ inputs.dry-run }}
@@ -115,11 +167,21 @@ jobs:
             }
             core.endGroup();
 
-            const outcome = dryRun ? `${caches.length} would be deleted` : `${deleted} deleted, ${failed} failed`;
+            const outcome = dryRun
+              ? `${caches.length} would be deleted`
+              : `${deleted} deleted, ${failed} failed`;
             core.notice(`Cache cleanup: ${outcome}`, { title: "Cache cleanup" });
             core.exportVariable("CACHES_OUTCOME", outcome);
 
+      - name: Skip cache cleanup
+        if: ${{ !inputs.delete-caches }}
+        shell: bash
+        run: |
+          echo "CACHES_OUTCOME=skipped" >> "$GITHUB_ENV"
+          echo "::notice title=Cache cleanup::Skipped (delete-caches=false)"
+
       - name: Delete stale workflow runs
+        if: inputs.delete-workflow-runs
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           RETENTION_DAYS: ${{ inputs.retention-days }}
@@ -181,15 +243,33 @@ jobs:
               core.endGroup();
             }
 
-            const runsOutcome = dryRun ? `${candidates.length} would be deleted` : `${deleted} deleted, ${failed} failed`;
+            const runsOutcome = dryRun
+              ? `${candidates.length} would be deleted`
+              : `${deleted} deleted, ${failed} failed`;
             core.notice(`Workflow-run cleanup: ${runsOutcome}`, { title: "Workflow-run cleanup" });
+            core.exportVariable("RUNS_OUTCOME", runsOutcome);
 
+      - name: Skip workflow-run cleanup
+        if: ${{ !inputs.delete-workflow-runs }}
+        shell: bash
+        run: |
+          echo "RUNS_OUTCOME=skipped" >> "$GITHUB_ENV"
+          echo "::notice title=Workflow-run cleanup::Skipped (delete-workflow-runs=false)"
+
+      - name: Write cleanup summary
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          ARTIFACTS_OUTCOME: ${{ env.ARTIFACTS_OUTCOME }}
+          CACHES_OUTCOME: ${{ env.CACHES_OUTCOME }}
+          RUNS_OUTCOME: ${{ env.RUNS_OUTCOME }}
+        with:
+          script: |
             await core.summary
               .addHeading("Cleanup summary", 3)
               .addTable([
                 [{ data: "Resource", header: true }, { data: "Outcome", header: true }],
                 ["Artifacts", process.env.ARTIFACTS_OUTCOME ?? "?"],
                 ["Caches", process.env.CACHES_OUTCOME ?? "?"],
-                ["Workflow runs", runsOutcome],
+                ["Workflow runs", process.env.RUNS_OUTCOME ?? "?"],
               ])
               .write();

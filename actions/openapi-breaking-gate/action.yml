@@ -1,5 +1,5 @@
 name: 'OpenAPI Breaking-Change Gate'
-description: 'Compares a freshly generated OpenAPI spec against the last published contract in an OCI registry and fails on breaking changes. Skips only when no contract has been published yet; any other registry error fails the gate rather than silently disabling it.'
+description: 'Compares a freshly generated OpenAPI spec against the last published contract in an OCI registry and fails on breaking changes. Skips only when no contract has been published yet; auth and network errors fail the gate rather than silently disabling it.'
 
 inputs:
   current-spec:
@@ -14,6 +14,17 @@ inputs:
   user:
     description: 'Username for the registry login.'
     required: true
+  baseline-tag:
+    description: 'Tag of the published baseline contract to compare against.'
+    required: false
+    default: 'latest'
+  treat-registry-denied-as-missing:
+    description: >-
+      When true (default), treat registry "denied" responses as first-publish
+      skips — GHCR often returns denied for non-existent private packages.
+      Set false to fail closed on any denied/unauthorized response.
+    required: false
+    default: 'true'
 outputs:
   skipped:
     description: 'true when no published baseline exists yet and the gate was skipped (first publish).'
@@ -31,34 +42,47 @@ runs:
         REGISTRY_TOKEN: ${{ inputs.token }}
         REGISTRY_USER: ${{ inputs.user }}
         IMAGE_INPUT: ${{ inputs.image }}
+        BASELINE_TAG: ${{ inputs.baseline-tag }}
+        TREAT_DENIED_AS_MISSING: ${{ inputs.treat-registry-denied-as-missing }}
       run: |
+        set -euo pipefail
         echo "::add-mask::${REGISTRY_TOKEN}"
         IMAGE="${IMAGE_INPUT,,}"
         REGISTRY="${IMAGE%%/*}"
-        echo "::group::Probe ${IMAGE}:latest"
+        REF="${IMAGE}:${BASELINE_TAG}"
+        echo "::group::Probe ${REF}"
         printf '%s' "$REGISTRY_TOKEN" | oras login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
         set +e
-        probe_err="$(oras manifest fetch "${IMAGE}:latest" 2>&1 >/dev/null)"
+        probe_err="$(oras manifest fetch "${REF}" 2>&1 >/dev/null)"
         probe_rc=$?
         set -e
         if [ "$probe_rc" -ne 0 ]; then
-          # Only a missing package/tag counts as "first publish". Auth failures,
-          # network errors and rate limits must fail the gate — skipping there
-          # would let a breaking change publish ungated.
-          if echo "$probe_err" | grep -qiE 'not found|name unknown|manifest unknown|denied'; then
-            echo "::warning title=OpenAPI gate::No published contract at ${IMAGE}:latest yet; skipping breaking-change gate (first publish)"
+          # Missing package/tag = first publish. Auth and network must fail closed.
+          if echo "$probe_err" | grep -qiE 'not found|name unknown|manifest unknown|repository does not exist'; then
+            echo "::warning title=OpenAPI gate::No published contract at ${REF} yet; skipping breaking-change gate (first publish)"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::endgroup::"
             exit 0
           fi
-          echo "::error title=OpenAPI gate::Could not probe ${IMAGE}:latest — refusing to continue ungated"
+          if echo "$probe_err" | grep -qiE 'denied|unauthorized|authentication|forbidden'; then
+            if [ "$TREAT_DENIED_AS_MISSING" = "true" ]; then
+              echo "::warning title=OpenAPI gate::Registry denied access to ${REF}; treating as first publish (treat-registry-denied-as-missing=true). Set that input to false to fail closed."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::error title=OpenAPI gate::Registry denied access to ${REF} — refusing to continue ungated"
+            printf '%s\n' "$probe_err"
+            exit 1
+          fi
+          echo "::error title=OpenAPI gate::Could not probe ${REF} — refusing to continue ungated"
           printf '%s\n' "$probe_err"
           exit 1
         fi
-        oras pull "${IMAGE}:latest" -o published-baseline
+        oras pull "${REF}" -o published-baseline
         spec="$(find published-baseline -type f -name '*.json' | head -n1)"
         if [ -z "$spec" ]; then
-          echo "::error title=OpenAPI gate::Published baseline at ${IMAGE}:latest contained no JSON spec"
+          echo "::error title=OpenAPI gate::Published baseline at ${REF} contained no JSON spec"
           exit 1
         fi
         echo "base_spec=${spec}" >> "$GITHUB_OUTPUT"
@@ -77,4 +101,6 @@ runs:
     - name: Report gate result
       if: steps.baseline.outputs.skip != 'true'
       shell: bash
-      run: echo "::notice title=OpenAPI gate::No breaking changes vs published :latest"
+      env:
+        BASELINE_TAG: ${{ inputs.baseline-tag }}
+      run: echo "::notice title=OpenAPI gate::No breaking changes vs published :${BASELINE_TAG}"

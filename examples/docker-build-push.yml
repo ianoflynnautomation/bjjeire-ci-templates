@@ -32,6 +32,8 @@ jobs:
       image-name: my-api
       dockerfile: ./src/MyApp.Api/Dockerfile
       push: ${{ github.event_name != 'pull_request' }}
+      # Optional: fail the job on HIGH/CRITICAL findings (default is report-only).
+      # trivy-exit-code: "1"
       labels: |
         org.opencontainers.image.title=my-api
         org.opencontainers.image.vendor=MyCompany

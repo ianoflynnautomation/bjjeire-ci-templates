@@ -1,4 +1,4 @@
-# Example caller: weekly artifact/cache/run cleanup.
+# Example caller: weekly artifact/run cleanup (caches left intact).
 # Copy into your repo as .github/workflows/cleanup-artifacts.yml.
 name: Cleanup Artifacts
 
@@ -27,4 +27,8 @@ jobs:
     uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/cleanup-artifacts.yml@v1
     with:
       retention-days: 30
+      artifact-retention-days: 7
+      delete-artifacts: true
+      delete-caches: false
+      delete-workflow-runs: true
       dry-run: ${{ (github.event.inputs.dry_run || 'false') == 'true' }}

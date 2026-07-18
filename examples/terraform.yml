@@ -36,6 +36,7 @@ jobs:
         key=myapp.tfstate
       var-file: environments/production.tfvars
       plan-artifact-name: tfplan-production
+      plugin-cache: true
     secrets:
       ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
       ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
@@ -59,6 +60,7 @@ jobs:
         key=myapp.tfstate
       environment: production
       plan-artifact-name: tfplan-production
+      plugin-cache: true
     secrets:
       ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
       ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}

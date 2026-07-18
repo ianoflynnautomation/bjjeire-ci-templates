@@ -1,0 +1,8 @@
+# Golden-path CI templates — every change fans out to consumer repos.
+# Require review from platform maintainers before merging.
+
+* @ianoflynnautomation
+
+.github/workflows/ @ianoflynnautomation
+actions/ @ianoflynnautomation
+examples/ @ianoflynnautomation

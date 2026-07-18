@@ -21,10 +21,12 @@ on:
         type: string
         default: "."
       terraform-version:
-        description: "Terraform CLI version constraint passed to hashicorp/setup-terraform."
+        description: >-
+          Terraform CLI version constraint passed to hashicorp/setup-terraform.
+          Prefer a pinned version (e.g. 1.10.5) over `latest` for reproducibility.
         required: false
         type: string
-        default: "latest"
+        default: "1.10.5"
       backend-config:
         description: "Multi-line `key=value` pairs, each passed to `terraform init -backend-config=`."
         required: false
@@ -45,6 +47,11 @@ on:
         required: false
         type: string
         default: ""
+      init-args:
+        description: "Extra arguments appended to `terraform init` (after backend-config flags)."
+        required: false
+        type: string
+        default: ""
       environment:
         description: "Optional GitHub environment for the plan job (scopes environment secrets/vars)."
         required: false
@@ -55,6 +62,21 @@ on:
         required: false
         type: string
         default: "tfplan"
+      runs-on:
+        description: "Runner label for validate and plan jobs."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      tf-log:
+        description: "Optional TF_LOG level (TRACE, DEBUG, INFO, WARN, ERROR). Empty = default."
+        required: false
+        type: string
+        default: ""
+      plugin-cache:
+        description: "Cache the Terraform plugin directory between runs."
+        required: false
+        type: boolean
+        default: true
     secrets:
       ARM_CLIENT_ID:
         description: "Azure AD app (workload identity) client ID for OIDC auth."
@@ -79,7 +101,7 @@ permissions:
 jobs:
   validate:
     name: Validate
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     defaults:
       run:
@@ -94,12 +116,14 @@ jobs:
       - name: Terraform fmt
         shell: bash
         run: |
+          set -euo pipefail
           echo "::group::terraform fmt -check"
           terraform fmt -check -recursive -diff
           echo "::endgroup::"
       - name: Terraform validate
         shell: bash
         run: |
+          set -euo pipefail
           echo "::group::terraform init (no backend)"
           terraform init -backend=false -input=false
           echo "::endgroup::"
@@ -110,7 +134,7 @@ jobs:
 
   plan:
     name: Plan
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     needs: validate
     timeout-minutes: 30
     environment: ${{ inputs.environment }}
@@ -129,6 +153,7 @@ jobs:
       ARM_USE_OIDC: "true"
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
+      TF_LOG: ${{ inputs.tf-log }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -137,17 +162,40 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform-version }}
           terraform_wrapper: false
+      - name: Prepare plugin cache directory
+        if: inputs.plugin-cache
+        shell: bash
+        run: mkdir -p "$HOME/.terraform.d/plugin-cache"
+      - name: Cache Terraform plugins
+        if: inputs.plugin-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: ${{ runner.os }}-tfplugins-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', inputs.working-directory)) }}
+          restore-keys: |
+            ${{ runner.os }}-tfplugins-${{ inputs.terraform-version }}-
+            ${{ runner.os }}-tfplugins-
+      - name: Configure plugin cache
+        if: inputs.plugin-cache
+        shell: bash
+        run: echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> "$GITHUB_ENV"
       - name: Terraform init
         shell: bash
         env:
           BACKEND_CONFIG: ${{ inputs.backend-config }}
+          INIT_ARGS: ${{ inputs.init-args }}
         run: |
+          set -euo pipefail
           echo "::group::terraform init"
           BACKEND_ARGS=()
           while IFS= read -r line; do
             [ -n "$line" ] && BACKEND_ARGS+=("-backend-config=${line}")
           done <<< "$BACKEND_CONFIG"
-          terraform init "${BACKEND_ARGS[@]}"
+          EXTRA=()
+          if [ -n "$INIT_ARGS" ]; then
+            read -r -a EXTRA <<< "$INIT_ARGS"
+          fi
+          terraform init "${BACKEND_ARGS[@]}" "${EXTRA[@]}"
           echo "::endgroup::"
       - name: Select workspace
         if: inputs.workspace != ''
@@ -162,6 +210,7 @@ jobs:
           VAR_FILE: ${{ inputs.var-file }}
           PLAN_ARGS: ${{ inputs.plan-args }}
         run: |
+          set -euo pipefail
           echo "::group::terraform plan"
           VAR_FILE_ARG=()
           if [ -n "$VAR_FILE" ]; then
@@ -186,10 +235,21 @@ jobs:
           esac
       - name: Write plan summary
         shell: bash
+        env:
+          HAS_CHANGES: ${{ steps.plan.outputs.has_changes }}
+          WORKDIR: ${{ inputs.working-directory }}
+          TF_VERSION: ${{ inputs.terraform-version }}
         run: |
+          set -euo pipefail
           PLAN_TEXT=$(terraform show -no-color tfplan | head -c 60000)
           {
             echo "### Terraform plan"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Module | \`${WORKDIR}\` |"
+            echo "| Terraform | \`${TF_VERSION}\` |"
+            echo "| Has changes | ${HAS_CHANGES} |"
             echo ""
             echo '```terraform'
             echo "$PLAN_TEXT"

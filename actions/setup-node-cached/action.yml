@@ -9,23 +9,33 @@ inputs:
     description: 'When `true`, run `npm ci` in the working directory after the cache restore.'
     required: false
     default: 'false'
+  cache-key-prefix:
+    description: 'Prefix for the cache key (segment monorepo caches per package).'
+    required: false
+    default: 'node'
+  package-manager:
+    description: 'Package manager used when install=true (`npm` only today; reserved for yarn/pnpm).'
+    required: false
+    default: 'npm'
 runs:
   using: "composite"
   steps:
     - name: Cache Node modules
-      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
       id: node_cache
       with:
         path: ${{ inputs.working-directory }}/node_modules
-        key: ${{ runner.os }}-node-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory), format('{0}/yarn.lock', inputs.working-directory)) }}
+        key: ${{ runner.os }}-${{ inputs.cache-key-prefix }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory), format('{0}/yarn.lock', inputs.working-directory), format('{0}/pnpm-lock.yaml', inputs.working-directory)) }}
         restore-keys: |
-          ${{ runner.os }}-node-
+          ${{ runner.os }}-${{ inputs.cache-key-prefix }}-
 
     - name: Install dependencies (npm ci)
-      if: inputs.install == 'true'
+      if: inputs.install == 'true' && inputs.package-manager == 'npm'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
+        set -euo pipefail
         echo "::group::npm ci"
         npm ci
         echo "::endgroup::"
+        echo "::notice title=Node cache::npm ci complete (cache-hit=${{ steps.node_cache.outputs.cache-hit }})"

@@ -5,11 +5,14 @@ name: .NET Build & Test (Reusable)
 #
 # Required caller permissions:
 #   contents: read
-#   checks: write
+#   checks: write          # only when publish-test-report: true
 #
 # No top-level concurrency here — reusable workflows inherit github.workflow
 # from the caller; declaring the same group in both self-deadlocks. Put
 # concurrency on the caller only.
+#
+# Note: NuGet cache steps are inlined (not the setup-dotnet-cached composite)
+# because relative `uses: ./actions/...` resolve against the *caller* repo.
 
 on:
   workflow_call:
@@ -28,6 +31,11 @@ on:
         required: false
         type: string
         default: "mcr.microsoft.com/dotnet/sdk:10.0"
+      runs-on:
+        description: "Runner label(s) for every job (e.g. ubuntu-latest or a self-hosted label)."
+        required: false
+        type: string
+        default: "ubuntu-latest"
       run-format-check:
         description: "Run `dotnet format --verify-no-changes` (whitespace + style) alongside the build."
         required: false
@@ -56,11 +64,46 @@ on:
         required: false
         type: string
         default: ""
+      test-fail-fast:
+        description: "Cancel remaining matrix legs when one test project fails."
+        required: false
+        type: boolean
+        default: true
+      verbosity:
+        description: "dotnet CLI verbosity (quiet, minimal, normal, detailed, diagnostic)."
+        required: false
+        type: string
+        default: "minimal"
+      restore-arguments:
+        description: "Extra arguments appended to `dotnet restore` (shell-split)."
+        required: false
+        type: string
+        default: ""
+      build-arguments:
+        description: "Extra arguments appended to `dotnet build` (shell-split)."
+        required: false
+        type: string
+        default: ""
+      test-arguments:
+        description: "Extra arguments appended to `dotnet test` (shell-split)."
+        required: false
+        type: string
+        default: ""
+      nuget-cache-key-prefix:
+        description: "Prefix for the NuGet cache key (segment monorepo caches per solution)."
+        required: false
+        type: string
+        default: "nuget"
       publish-test-report:
         description: "Publish a dotnet-trx test report check from the TRX artifacts. Requires the caller to grant checks: write."
         required: false
         type: boolean
         default: false
+      test-report-name:
+        description: "Check name used by the test reporter."
+        required: false
+        type: string
+        default: "Test Results"
       build-artifact-name:
         description: "Artifact name for the build output shared with the test matrix."
         required: false
@@ -75,6 +118,11 @@ on:
           src/**/obj
           tests/**/bin
           tests/**/obj
+      artifact-retention-days:
+        description: "Retention days for build and test artifacts."
+        required: false
+        type: number
+        default: 1
     outputs:
       build-successful:
         description: "true when the solution built successfully."
@@ -87,7 +135,7 @@ jobs:
   plan:
     name: Plan Test Matrix
     if: inputs.test-projects != ''
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 5
     outputs:
       test_matrix: ${{ steps.plan.outputs.matrix }}
@@ -98,16 +146,29 @@ jobs:
         env:
           TEST_PROJECTS: ${{ inputs.test-projects }}
         run: |
+          set -euo pipefail
           matrix=$(printf '%s\n' "$TEST_PROJECTS" | jq -R -n -c \
             '[inputs | gsub("^\\s+|\\s+$"; "") | select(length > 0)
               | {project: ., name: (split("/") | last | sub("\\.csproj$"; ""))}]')
+          count=$(echo "$matrix" | jq 'length')
+          if [ "$count" -eq 0 ]; then
+            echo "::error title=Test matrix::test-projects was non-empty but produced zero projects"
+            exit 1
+          fi
           echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
-          echo "::notice title=Test matrix::$(echo "$matrix" | jq 'length') project(s) planned"
+          echo "::notice title=Test matrix::${count} project(s) planned"
+          {
+            echo "### Test matrix"
+            echo ""
+            echo "| Name | Project |"
+            echo "| --- | --- |"
+            echo "$matrix" | jq -r '.[] | "| \(.name) | `\(.project)` |"'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   format:
     name: Format Check
     if: inputs.run-format-check
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     container:
       image: ${{ inputs.container-image }}
     timeout-minutes: 10
@@ -119,9 +180,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.nuget/packages
-          key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json', '**/*.csproj') }}
+          key: ${{ runner.os }}-${{ inputs.nuget-cache-key-prefix }}-${{ hashFiles('**/packages.lock.json', '**/*.csproj') }}
           restore-keys: |
-            ${{ runner.os }}-nuget-
+            ${{ runner.os }}-${{ inputs.nuget-cache-key-prefix }}-
       - name: Check .NET code formatting
         shell: bash
         env:
@@ -129,6 +190,7 @@ jobs:
           FORMAT_INCLUDE: ${{ inputs.format-include }}
           FORMAT_EXCLUDE: ${{ inputs.format-exclude }}
         run: |
+          set -euo pipefail
           EXCLUDE_ARG=()
           if [ -n "$FORMAT_EXCLUDE" ]; then
             EXCLUDE_ARG=(--exclude "$FORMAT_EXCLUDE")
@@ -143,7 +205,7 @@ jobs:
 
   build:
     name: Build Solution
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     container:
       image: ${{ inputs.container-image }}
     timeout-minutes: 15
@@ -157,16 +219,24 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.nuget/packages
-          key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json', '**/*.csproj') }}
+          key: ${{ runner.os }}-${{ inputs.nuget-cache-key-prefix }}-${{ hashFiles('**/packages.lock.json', '**/*.csproj') }}
           restore-keys: |
-            ${{ runner.os }}-nuget-
+            ${{ runner.os }}-${{ inputs.nuget-cache-key-prefix }}-
       - name: Restore dependencies
         shell: bash
         env:
           SOLUTION_PATH: ${{ inputs.solution-path }}
+          VERBOSITY: ${{ inputs.verbosity }}
+          RESTORE_ARGUMENTS: ${{ inputs.restore-arguments }}
         run: |
+          set -euo pipefail
+          EXTRA=()
+          # shellcheck disable=SC2206
+          if [ -n "$RESTORE_ARGUMENTS" ]; then
+            read -r -a EXTRA <<< "$RESTORE_ARGUMENTS"
+          fi
           echo "::group::dotnet restore"
-          dotnet restore "$SOLUTION_PATH"
+          dotnet restore "$SOLUTION_PATH" --verbosity "$VERBOSITY" "${EXTRA[@]}"
           echo "::endgroup::"
       - name: Build
         id: build_step
@@ -174,9 +244,16 @@ jobs:
         env:
           SOLUTION_PATH: ${{ inputs.solution-path }}
           CONFIGURATION: ${{ inputs.configuration }}
+          VERBOSITY: ${{ inputs.verbosity }}
+          BUILD_ARGUMENTS: ${{ inputs.build-arguments }}
         run: |
+          set -euo pipefail
+          EXTRA=()
+          if [ -n "$BUILD_ARGUMENTS" ]; then
+            read -r -a EXTRA <<< "$BUILD_ARGUMENTS"
+          fi
           echo "::group::dotnet build"
-          dotnet build "$SOLUTION_PATH" --configuration "$CONFIGURATION" --no-restore
+          dotnet build "$SOLUTION_PATH" --configuration "$CONFIGURATION" --no-restore --verbosity "$VERBOSITY" "${EXTRA[@]}"
           echo "::endgroup::"
           echo "::notice title=Build .NET::Solution built successfully ($CONFIGURATION)"
       - name: Upload build output
@@ -186,18 +263,37 @@ jobs:
           name: ${{ inputs.build-artifact-name }}
           path: ${{ inputs.build-artifact-paths }}
           if-no-files-found: error
-          retention-days: 1
+          retention-days: ${{ inputs.artifact-retention-days }}
+      - name: Write build summary
+        if: always()
+        shell: bash
+        env:
+          SOLUTION_PATH: ${{ inputs.solution-path }}
+          CONFIGURATION: ${{ inputs.configuration }}
+          CONTAINER_IMAGE: ${{ inputs.container-image }}
+          OUTCOME: ${{ steps.build_step.outcome }}
+        run: |
+          {
+            echo "### .NET build"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Solution | \`${SOLUTION_PATH}\` |"
+            echo "| Configuration | \`${CONFIGURATION}\` |"
+            echo "| SDK image | \`${CONTAINER_IMAGE}\` |"
+            echo "| Result | ${OUTCOME} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   test:
     name: Test ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     container:
       image: ${{ inputs.container-image }}
     needs: [plan, build]
     if: inputs.test-projects != ''
     timeout-minutes: 30
     strategy:
-      fail-fast: true
+      fail-fast: ${{ inputs.test-fail-fast }}
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.test_matrix) }}
     steps:
@@ -208,9 +304,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.nuget/packages
-          key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json', '**/*.csproj') }}
+          key: ${{ runner.os }}-${{ inputs.nuget-cache-key-prefix }}-${{ hashFiles('**/packages.lock.json', '**/*.csproj') }}
           restore-keys: |
-            ${{ runner.os }}-nuget-
+            ${{ runner.os }}-${{ inputs.nuget-cache-key-prefix }}-
       - name: Download build output
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
@@ -223,19 +319,29 @@ jobs:
           RESULTS_PREFIX: ${{ matrix.name }}
           FILTER_CRITERIA: ${{ inputs.test-filter }}
           CONFIGURATION: ${{ inputs.configuration }}
+          VERBOSITY: ${{ inputs.verbosity }}
+          TEST_ARGUMENTS: ${{ inputs.test-arguments }}
         run: |
+          set -euo pipefail
           echo "::group::dotnet test (${RESULTS_PREFIX})"
           FILTER_ARG=()
           if [ -n "$FILTER_CRITERIA" ]; then
             FILTER_ARG=(--filter "$FILTER_CRITERIA")
           fi
+          EXTRA=()
+          if [ -n "$TEST_ARGUMENTS" ]; then
+            read -r -a EXTRA <<< "$TEST_ARGUMENTS"
+          fi
+          # upload-artifact strips the exec bit; apphost names often contain dots
           find . -type f -path '*/bin/*' -exec chmod +x {} + 2>/dev/null || true
           dotnet test "$PROJECT_PATH" \
             --configuration "$CONFIGURATION" \
             --no-build --no-restore \
+            --verbosity "$VERBOSITY" \
             --logger "trx;LogFileName=${RESULTS_PREFIX}.trx" \
             --results-directory "TestResults/${RESULTS_PREFIX}" \
-            "${FILTER_ARG[@]}"
+            "${FILTER_ARG[@]}" \
+            "${EXTRA[@]}"
           echo "::endgroup::"
           echo "::notice title=Tests passed::${RESULTS_PREFIX}"
       - name: Upload test results
@@ -244,11 +350,11 @@ jobs:
         with:
           name: test_results_${{ matrix.name }}
           path: TestResults/${{ matrix.name }}
-          retention-days: 1
+          retention-days: ${{ inputs.artifact-retention-days }}
 
   report:
     name: Publish Test Report
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     needs: test
     if: |
       always() && inputs.publish-test-report &&
@@ -269,6 +375,7 @@ jobs:
       - name: List downloaded results
         shell: bash
         run: |
+          set -euo pipefail
           echo "::group::Downloaded test artifacts"
           find test_artifacts -maxdepth 3 -type f -name '*.trx' | sort
           echo "::endgroup::"
@@ -277,7 +384,7 @@ jobs:
       - name: Publish test results summary
         uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2  # v3.0.0
         with:
-          name: Test Results
+          name: ${{ inputs.test-report-name }}
           path: "test_artifacts/**/*.trx"
           reporter: dotnet-trx
           fail-on-error: true

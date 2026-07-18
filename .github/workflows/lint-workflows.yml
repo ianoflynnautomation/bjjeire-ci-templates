@@ -36,6 +36,11 @@ on:
         required: false
         type: string
         default: "error"
+      runs-on:
+        description: "Runner label for the lint job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
 
 permissions:
   contents: read
@@ -43,7 +48,7 @@ permissions:
 jobs:
   lint:
     name: actionlint + zizmor
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -66,6 +71,7 @@ jobs:
           ZIZMOR_ARGS: ${{ inputs.zizmor-args }}
           ZIZMOR_PATHS: ${{ inputs.zizmor-paths }}
         run: |
+          set -euo pipefail
           read -ra args <<< "$ZIZMOR_ARGS"
           read -ra paths <<< "$ZIZMOR_PATHS"
           pipx run "zizmor==${ZIZMOR_VERSION}" --format plain "${args[@]}" "${paths[@]}"
@@ -74,9 +80,27 @@ jobs:
         env:
           SCAN_PATHS: ${{ inputs.zizmor-paths }}
         run: |
+          set -euo pipefail
           read -ra paths <<< "$SCAN_PATHS"
           if grep -rnE '::set-(output|env)::' "${paths[@]}"; then
             echo "::error title=Deprecated commands::Use \$GITHUB_OUTPUT / \$GITHUB_ENV instead of ::set-output / ::set-env"
             exit 1
           fi
           echo "::notice title=Lint::No deprecated workflow commands found"
+      - name: Write lint summary
+        if: always()
+        shell: bash
+        env:
+          ZIZMOR_ENFORCE: ${{ inputs.zizmor-enforce }}
+          ZIZMOR_PATHS: ${{ inputs.zizmor-paths }}
+        run: |
+          {
+            echo "### Workflow lint"
+            echo ""
+            echo "| Check | Scope |"
+            echo "| --- | --- |"
+            echo "| actionlint | \`.github/workflows\` (reviewdog) |"
+            echo "| zizmor | \`${ZIZMOR_PATHS}\` (enforce=${ZIZMOR_ENFORCE}) |"
+            echo "| deprecated commands | \`${ZIZMOR_PATHS}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+

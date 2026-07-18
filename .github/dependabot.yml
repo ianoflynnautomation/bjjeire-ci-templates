@@ -21,3 +21,7 @@ updates:
     directory: "/actions/dotnet-run-tests"
     schedule:
       interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/openapi-breaking-gate"
+    schedule:
+      interval: weekly
