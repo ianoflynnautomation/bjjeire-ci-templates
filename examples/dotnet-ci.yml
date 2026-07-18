@@ -18,8 +18,10 @@ jobs:
     name: .NET Build & Test
     permissions:
       contents: read
+      checks: write
     uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/dotnet-build.yml@v1
     with:
+      publish-test-report: true
       solution-path: MyApp.sln
       configuration: Release
       container-image: mcr.microsoft.com/dotnet/sdk:10.0

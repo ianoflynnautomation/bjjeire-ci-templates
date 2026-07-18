@@ -5,7 +5,7 @@ name: .NET Build & Test (Reusable)
 #
 # Required caller permissions:
 #   contents: read
-#   checks: write   # only when publish-test-report: true
+#   checks: write
 #
 # No top-level concurrency here — reusable workflows inherit github.workflow
 # from the caller; declaring the same group in both self-deadlocks. Put
@@ -229,8 +229,6 @@ jobs:
           if [ -n "$FILTER_CRITERIA" ]; then
             FILTER_ARG=(--filter "$FILTER_CRITERIA")
           fi
-          # upload-artifact strips the exec bit; apphost binary names often
-          # contain dots (e.g. My.Project.Tests), so chmod everything under bin
           find . -type f -path '*/bin/*' -exec chmod +x {} + 2>/dev/null || true
           dotnet test "$PROJECT_PATH" \
             --configuration "$CONFIGURATION" \
