@@ -19,7 +19,7 @@ jobs:
     permissions:
       contents: read
       checks: write
-    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/dotnet-build.yml@v1
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/dotnet-build-test.yml@v1
     with:
       publish-test-report: true
       solution-path: MyApp.sln

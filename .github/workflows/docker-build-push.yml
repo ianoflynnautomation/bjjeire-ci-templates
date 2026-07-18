@@ -149,9 +149,6 @@ on:
         description: "Full image reference without tag, e.g. ghcr.io/owner/my-api."
         value: ${{ jobs.build-push.outputs.image_ref }}
 
-permissions:
-  contents: read
-
 jobs:
   build-push:
     name: Build & Push ${{ inputs.image-name }}
@@ -205,9 +202,6 @@ jobs:
         with:
           driver: docker-container
 
-      # Login when pushing, or when custom registry credentials are supplied
-      # (private base images on build-only PR runs). secrets.* is not legal in
-      # step `if:`; resolve via env instead.
       - name: Resolve registry login
         id: reglogin
         shell: bash

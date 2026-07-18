@@ -73,9 +73,6 @@ on:
         description: "Azure subscription ID."
         required: false
 
-permissions:
-  contents: read
-
 jobs:
   apply:
     name: Apply

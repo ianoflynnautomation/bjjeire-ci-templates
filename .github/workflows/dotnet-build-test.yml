@@ -128,8 +128,10 @@ on:
         description: "true when the solution built successfully."
         value: ${{ jobs.build.outputs.build_successful }}
 
-permissions:
-  contents: read
+# No top-level permissions block: in a called workflow it downgrades the
+# caller-granted token and job-level blocks cannot re-elevate past it
+# (caller grants checks: write + top-level contents: read -> nested job is
+# "allowed checks: none" and the run fails at parse). Permissions live per job.
 
 jobs:
   plan:
@@ -137,6 +139,7 @@ jobs:
     if: inputs.test-projects != ''
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 5
+    permissions: {}
     outputs:
       test_matrix: ${{ steps.plan.outputs.matrix }}
     steps:
@@ -172,6 +175,8 @@ jobs:
     container:
       image: ${{ inputs.container-image }}
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -209,6 +214,8 @@ jobs:
     container:
       image: ${{ inputs.container-image }}
     timeout-minutes: 15
+    permissions:
+      contents: read
     outputs:
       build_successful: ${{ steps.build_step.outcome == 'success' }}
     steps:
@@ -292,6 +299,8 @@ jobs:
     needs: [plan, build]
     if: inputs.test-projects != ''
     timeout-minutes: 30
+    permissions:
+      contents: read
     strategy:
       fail-fast: ${{ inputs.test-fail-fast }}
       matrix:

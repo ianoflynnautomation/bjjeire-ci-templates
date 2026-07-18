@@ -42,9 +42,6 @@ on:
         type: string
         default: "ubuntu-latest"
 
-permissions:
-  contents: read
-
 jobs:
   lint:
     name: actionlint + zizmor

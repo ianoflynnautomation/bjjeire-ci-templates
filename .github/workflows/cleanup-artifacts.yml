@@ -57,9 +57,6 @@ on:
         type: string
         default: "ubuntu-latest"
 
-permissions:
-  contents: read
-
 jobs:
   cleanup:
     name: Delete Expired Artifacts, Caches and Workflow Runs

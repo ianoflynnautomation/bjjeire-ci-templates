@@ -95,9 +95,6 @@ on:
         description: "Name of the uploaded plan artifact."
         value: ${{ inputs.plan-artifact-name }}
 
-permissions:
-  contents: read
-
 jobs:
   validate:
     name: Validate
