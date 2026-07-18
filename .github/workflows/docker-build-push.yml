@@ -265,7 +265,7 @@ jobs:
 
       - name: Attest build provenance
         if: inputs.push && inputs.attest && steps.build.outputs.digest != ''
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be  # v2
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
           subject-name: ${{ steps.image.outputs.ref }}
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -356,7 +356,7 @@ jobs:
 
       - name: Upload Trivy SARIF to GitHub code scanning
         if: always() && hashFiles(format('trivy-{0}.sarif', inputs.image-name)) != ''
-        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a  # v4.37.1
         with:
           sarif_file: trivy-${{ inputs.image-name }}.sarif
           category: trivy-${{ inputs.image-name }}
