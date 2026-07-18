@@ -84,6 +84,26 @@ permissions:
   contents: read
 
 jobs:
+  plan:
+    name: Plan Test Matrix
+    if: inputs.test-projects != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      test_matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Plan test matrix
+        id: plan
+        shell: bash
+        env:
+          TEST_PROJECTS: ${{ inputs.test-projects }}
+        run: |
+          matrix=$(printf '%s\n' "$TEST_PROJECTS" | jq -R -n -c \
+            '[inputs | gsub("^\\s+|\\s+$"; "") | select(length > 0)
+              | {project: ., name: (split("/") | last | sub("\\.csproj$"; ""))}]')
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Test matrix::$(echo "$matrix" | jq 'length') project(s) planned"
+
   format:
     name: Format Check
     if: inputs.run-format-check
@@ -129,19 +149,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       build_successful: ${{ steps.build_step.outcome == 'success' }}
-      test_matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      - name: Plan test matrix
-        id: plan
-        shell: bash
-        env:
-          TEST_PROJECTS: ${{ inputs.test-projects }}
-        run: |
-          matrix=$(printf '%s\n' "$TEST_PROJECTS" | jq -R -n -c \
-            '[inputs | gsub("^\\s+|\\s+$"; "") | select(length > 0)
-              | {project: ., name: (split("/") | last | sub("\\.csproj$"; ""))}]')
-          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
-          echo "::notice title=Test matrix::$(echo "$matrix" | jq 'length') project(s) planned"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
@@ -185,13 +193,13 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ${{ inputs.container-image }}
-    needs: build
+    needs: [plan, build]
     if: inputs.test-projects != ''
     timeout-minutes: 30
     strategy:
       fail-fast: true
       matrix:
-        include: ${{ fromJSON(needs.build.outputs.test_matrix) }}
+        include: ${{ fromJSON(needs.plan.outputs.test_matrix) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
