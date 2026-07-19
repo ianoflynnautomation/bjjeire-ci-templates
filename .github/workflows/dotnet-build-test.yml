@@ -128,11 +128,6 @@ on:
         description: "true when the solution built successfully."
         value: ${{ jobs.build.outputs.build_successful }}
 
-# No top-level permissions block: in a called workflow it downgrades the
-# caller-granted token and job-level blocks cannot re-elevate past it
-# (caller grants checks: write + top-level contents: read -> nested job is
-# "allowed checks: none" and the run fails at parse). Permissions live per job.
-
 jobs:
   plan:
     name: Plan Test Matrix

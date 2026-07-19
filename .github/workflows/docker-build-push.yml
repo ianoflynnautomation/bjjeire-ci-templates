@@ -340,7 +340,6 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
-          # Prefer digest over mutable tags for an immutable scan subject.
           image-ref: ${{ needs.build-push.outputs.image_ref }}@${{ needs.build-push.outputs.image_digest }}
           format: sarif
           output: trivy-${{ inputs.image-name }}.sarif

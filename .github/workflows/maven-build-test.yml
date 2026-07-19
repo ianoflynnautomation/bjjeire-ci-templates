@@ -1,0 +1,185 @@
+name: Maven Build & Test (Reusable)
+
+# Reusable golden path for Maven/Spring Boot services: single `mvn verify`
+# running the surefire unit suite and the failsafe integration suite, with an
+# optional JUnit test report check.
+#
+# Required caller permissions:
+#   contents: read
+#   checks: write          # only when publish-test-report: true
+#
+# Jobs run directly on the runner (not in a toolchain container) because the
+# failsafe suites use Testcontainers, which needs the runner's Docker daemon.
+# The JDK version is pinned via inputs instead.
+#
+# No top-level concurrency here — reusable workflows inherit github.workflow
+# from the caller; declaring the same group in both self-deadlocks. Put
+# concurrency on the caller only.
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Directory containing the pom.xml."
+        required: false
+        type: string
+        default: "."
+      java-version:
+        description: "JDK version — the single source of truth for the toolchain."
+        required: false
+        type: string
+        default: "21"
+      java-distribution:
+        description: "JDK distribution for actions/setup-java."
+        required: false
+        type: string
+        default: "temurin"
+      maven-goals:
+        description: "Maven goals/phases to run (verify = unit + integration suites)."
+        required: false
+        type: string
+        default: "verify"
+      maven-arguments:
+        description: "Extra arguments appended to the Maven invocation (shell-split)."
+        required: false
+        type: string
+        default: ""
+      runs-on:
+        description: "Runner label(s) for every job. Needs a Docker daemon for Testcontainers suites."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      publish-test-report:
+        description: "Publish a java-junit test report check from the surefire/failsafe XML. Requires the caller to grant checks: write."
+        required: false
+        type: boolean
+        default: false
+      test-report-name:
+        description: "Check name used by the test reporter."
+        required: false
+        type: string
+        default: "Test Results"
+      test-results-artifact-name:
+        description: "Artifact name for the surefire/failsafe result XML."
+        required: false
+        type: string
+        default: "maven-test-results"
+      artifact-retention-days:
+        description: "Retention days for test result artifacts."
+        required: false
+        type: number
+        default: 1
+    outputs:
+      build-successful:
+        description: "true when the Maven build (including tests) succeeded."
+        value: ${{ jobs.verify.outputs.build_successful }}
+
+jobs:
+  verify:
+    name: Maven Verify
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      build_successful: ${{ steps.verify_step.outcome == 'success' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95  # v5
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: ${{ inputs.java-distribution }}
+          cache: maven
+          cache-dependency-path: ${{ inputs.working-directory }}/pom.xml
+
+      - name: Maven ${{ inputs.maven-goals }}
+        id: verify_step
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          MAVEN_GOALS: ${{ inputs.maven-goals }}
+          MAVEN_ARGUMENTS: ${{ inputs.maven-arguments }}
+        run: |
+          set -euo pipefail
+          EXTRA=()
+          if [ -n "$MAVEN_ARGUMENTS" ]; then
+            read -r -a EXTRA <<< "$MAVEN_ARGUMENTS"
+          fi
+          read -r -a GOALS <<< "$MAVEN_GOALS"
+          echo "::group::mvn ${MAVEN_GOALS}"
+          mvn --batch-mode --no-transfer-progress "${GOALS[@]}" "${EXTRA[@]}"
+          echo "::endgroup::"
+          echo "::notice title=Maven::${MAVEN_GOALS} succeeded"
+
+      - name: Upload test results
+        if: always() && steps.verify_step.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ inputs.test-results-artifact-name }}
+          path: |
+            ${{ inputs.working-directory }}/**/target/surefire-reports/*.xml
+            ${{ inputs.working-directory }}/**/target/failsafe-reports/*.xml
+          if-no-files-found: warn
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+      - name: Write build summary
+        if: always()
+        shell: bash
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          JAVA_VERSION: ${{ inputs.java-version }}
+          JAVA_DISTRIBUTION: ${{ inputs.java-distribution }}
+          MAVEN_GOALS: ${{ inputs.maven-goals }}
+          OUTCOME: ${{ steps.verify_step.outcome }}
+        run: |
+          {
+            echo "### Maven build"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Module | \`${WORKING_DIRECTORY}\` |"
+            echo "| JDK | \`${JAVA_DISTRIBUTION} ${JAVA_VERSION}\` |"
+            echo "| Goals | \`${MAVEN_GOALS}\` |"
+            echo "| Result | ${OUTCOME} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  report:
+    name: Publish Test Report
+    runs-on: ${{ inputs.runs-on }}
+    needs: verify
+    if: |
+      always() && inputs.publish-test-report &&
+      (needs.verify.result == 'success' || needs.verify.result == 'failure')
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Download test result artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ inputs.test-results-artifact-name }}
+          path: test_artifacts
+      - name: List downloaded results
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Downloaded test artifacts"
+          find test_artifacts -type f -name '*.xml' | sort
+          echo "::endgroup::"
+          XML_COUNT="$(find test_artifacts -type f -name '*.xml' | wc -l | tr -d ' ')"
+          echo "::notice title=Test artifacts::Found ${XML_COUNT} JUnit XML file(s)"
+      - name: Publish test results summary
+        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2  # v3.0.0
+        with:
+          name: ${{ inputs.test-report-name }}
+          path: "test_artifacts/**/*.xml"
+          reporter: java-junit
+          fail-on-error: true
