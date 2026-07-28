@@ -164,7 +164,7 @@ jobs:
       image_tag: ${{ steps.meta.outputs.version }}
       image_ref: ${{ steps.image.outputs.ref }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: ${{ inputs.fetch-depth }}
           persist-credentials: false
@@ -218,7 +218,7 @@ jobs:
 
       - name: Login to registry
         if: steps.reglogin.outputs.needed == 'true'
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c  # v4.5.2
         with:
           registry: ${{ inputs.registry }}
           username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
@@ -259,7 +259,7 @@ jobs:
 
       - name: Attest build provenance
         if: inputs.push && inputs.attest && steps.build.outputs.digest != ''
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be  # v2
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
           subject-name: ${{ steps.image.outputs.ref }}
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -315,7 +315,7 @@ jobs:
       security-events: write
     steps:
       - name: Login to registry
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c  # v4.5.2
         with:
           registry: ${{ inputs.registry }}
           username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
@@ -349,7 +349,7 @@ jobs:
 
       - name: Upload Trivy SARIF to GitHub code scanning
         if: always() && hashFiles(format('trivy-{0}.sarif', inputs.image-name)) != ''
-        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81  # v4.37.3
         with:
           sarif_file: trivy-${{ inputs.image-name }}.sarif
           category: trivy-${{ inputs.image-name }}
