@@ -91,7 +91,7 @@ runs:
 
     - name: Compare against published baseline
       if: steps.baseline.outputs.skip != 'true'
-      uses: oasdiff/oasdiff-action/breaking@024f6c399f9a21ada1addb0f9a36ce1bfac995f1  # v0.1.6
+      uses: oasdiff/oasdiff-action/breaking@033c15c845bef10f148afb0fa781bf1b2a7fe1bf  # v0.1.12
       with:
         base: ${{ steps.baseline.outputs.base_spec }}
         revision: ${{ inputs.current-spec }}
