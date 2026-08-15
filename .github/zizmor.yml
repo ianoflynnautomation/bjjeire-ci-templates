@@ -1,0 +1,10 @@
+rules:
+
+  unpinned-images:
+    ignore:
+      - dotnet-build-test.yml
+      - node-build-test.yml
+
+  artipacked:
+    ignore:
+      - release.yml
