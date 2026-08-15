@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.0.0...v1.1.0) (2026-08-15)
+
+
+### Features
+
+* add skillz and agents ([17533ae](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/17533aea6a8f373fc439fc0798d292bb15c15a22))
+
+
+### Bug Fixes
+
+* failiy ci ([6c11d5d](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/6c11d5de62ad2522e4667d59149635fd641e35c9))
+* zizmor errors ([2c3ff41](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/2c3ff41a27b77b45b126cafaa99a8cb55c529beb))
+
 ## 1.0.0 (2026-07-19)
 
 
