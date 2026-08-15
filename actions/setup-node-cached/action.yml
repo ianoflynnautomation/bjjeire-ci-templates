@@ -33,9 +33,11 @@ runs:
       if: inputs.install == 'true' && inputs.package-manager == 'npm'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        CACHE_HIT: ${{ steps.node_cache.outputs.cache-hit }}
       run: |
         set -euo pipefail
         echo "::group::npm ci"
         npm ci
         echo "::endgroup::"
-        echo "::notice title=Node cache::npm ci complete (cache-hit=${{ steps.node_cache.outputs.cache-hit }})"
+        echo "::notice title=Node cache::npm ci complete (cache-hit=${CACHE_HIT:-false})"
