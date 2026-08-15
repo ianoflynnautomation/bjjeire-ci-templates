@@ -8,16 +8,28 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 
 | Workflow | Purpose |
 |---|---|
-| [`dotnet-build.yml`](.github/workflows/dotnet-build.yml) | Build a .NET solution once, optional `dotnet format` gate, matrix test run against shared build output |
+| [`dotnet-build-test.yml`](.github/workflows/dotnet-build-test.yml) | Build a .NET solution once, optional `dotnet format` gate, matrix test run against shared build output |
+| [`maven-build-test.yml`](.github/workflows/maven-build-test.yml) | `mvn verify` (surefire + failsafe) on the host runner for Testcontainers, optional JUnit report check |
+| [`node-build-test.yml`](.github/workflows/node-build-test.yml) | Container-first Node job: node_modules cache, install, ordered commands, artifact in/out + failure diagnostics |
 | [`docker-build-push.yml`](.github/workflows/docker-build-push.yml) | Multi-arch buildx build with GHA cache, SBOM + provenance attestation, cosign keyless signing, Trivy scan → code scanning |
+| [`security-scan.yml`](.github/workflows/security-scan.yml) | Dependency review + gitleaks secret scan + Semgrep SAST, each independently toggleable |
 | [`terraform-plan.yml`](.github/workflows/terraform-plan.yml) | fmt + validate + plan (Azure OIDC), plan artifact + step summary, `has-changes` output |
 | [`terraform-apply.yml`](.github/workflows/terraform-apply.yml) | Applies the exact plan artifact, gated by a GitHub environment (required reviewers) |
+| [`lint-workflows.yml`](.github/workflows/lint-workflows.yml) | actionlint + zizmor + deprecated-command gate for a repo's workflow files |
+| [`sync-labels.yml`](.github/workflows/sync-labels.yml) | Upsert repository labels from a version-controlled YAML file (never deletes; `dry-run` supported) |
+| [`cleanup-artifacts.yml`](.github/workflows/cleanup-artifacts.yml) | Scheduled cleanup of artifacts and stale non-default-branch workflow runs (caches opt-in) |
 
 | Composite action | Purpose |
 |---|---|
 | [`actions/setup-dotnet-cached`](actions/setup-dotnet-cached/action.yml) | NuGet package cache (container-first jobs — no SDK install) |
 | [`actions/setup-node-cached`](actions/setup-node-cached/action.yml) | node_modules cache + optional `npm ci` |
 | [`actions/dotnet-run-tests`](actions/dotnet-run-tests/action.yml) | Single test project with TRX output + artifact upload |
+| [`actions/detect-changes`](actions/detect-changes/action.yml) | Evaluate caller-supplied path filters; emits a `changes` JSON array + summary. Filters stay in the caller |
+| [`actions/check-required-jobs`](actions/check-required-jobs/action.yml) | Aggregate branch-protection gate over `toJson(needs)` — fails on failure/cancelled, passes on path-filter skips |
+| [`actions/sticky-comment`](actions/sticky-comment/action.yml) | Marker-identified issue/PR comment that updates in place instead of spamming the thread |
+| [`actions/maven-openapi-export`](actions/maven-openapi-export/action.yml) | Run the failsafe IT that writes the OpenAPI document, then validate the JSON |
+| [`actions/openapi-breaking-gate`](actions/openapi-breaking-gate/action.yml) | Pull the last published OpenAPI contract from an OCI registry and fail on breaking changes (oasdiff); skips only on genuine first publish |
+| [`actions/oci-push-artifact`](actions/oci-push-artifact/action.yml) | Publish a file to any OCI registry as a typed artifact with ORAS; extra tags alias one digest |
 
 Full input/output documentation lives in each workflow's `workflow_call` block — every input has a description, type, and default. Ready-to-copy caller workflows are in [`examples/`](examples/).
 
@@ -30,7 +42,8 @@ jobs:
   dotnet:
     permissions:
       contents: read
-    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/dotnet-build.yml@v1
+      checks: write   # when publish-test-report: true
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/dotnet-build-test.yml@v1
     with:
       solution-path: MyApp.sln
 ```
@@ -48,10 +61,12 @@ steps:
 
 ### Rules for callers
 
-- **Permissions superset** — the caller job must grant every permission any job inside the reusable workflow uses, or GitHub rejects the run at parse time. Each workflow's header comment lists exactly what to grant.
+- **Pin `@v1` (or `@vX.Y.Z`), never `@main`** — floating major tags move on release; `@main` is an unstable moving target and breaks the SemVer contract.
+- **Permissions superset** — the caller job must grant every permission any job inside the reusable workflow uses, or GitHub rejects the run at parse time. Each workflow's header comment lists exactly what to grant. Conditional jobs still need the superset at the caller.
 - **Concurrency on the caller only** — reusable workflows inherit `github.workflow` from the caller. If both declare the same concurrency group, the run deadlocks against itself. None of the workflows here declare `concurrency`; put it on your caller.
 - **Plan → apply in one run** — `terraform-apply.yml` consumes the artifact uploaded by `terraform-plan.yml`; artifacts don't cross workflow runs, so chain them with `needs:` in the same caller and gate apply with an environment.
 - **Secrets** — pass explicitly (shown in examples) or use `secrets: inherit`. Explicit is preferred: it documents the contract.
+- **Relative composite paths don't work cross-repo** — `uses: ./actions/...` inside a reusable workflow resolves against the *caller*. Composites are consumed via `owner/repo/actions/name@v1`; language cache steps inside reusable workflows are inlined for that reason.
 
 ## Versioning
 
@@ -67,5 +82,20 @@ steps:
 - **Secrets via `env:` only** — never interpolate `${{ secrets.X }}` into a script body.
 - **Observability** — `::group::`/`::notice`/`::error title=` conventions and a `$GITHUB_STEP_SUMMARY` table in every workflow.
 - **OIDC over static credentials** — Terraform auth uses Azure workload identity (`ARM_USE_OIDC`); image signing and provenance use keyless OIDC.
+- **Project-agnostic inputs** — no org/repo paths, image names, or cloud resource IDs baked into defaults. Callers supply those.
+- **`runs-on` is an input** — default `ubuntu-latest`; override for larger or self-hosted runners without forking the workflow.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) before changing anything here — every consumer repo is downstream of this one.
+## Security notes
+
+| Area | Approach |
+|---|---|
+| Permissions | Least privilege per job; caller must still declare the superset |
+| Credentials | Azure OIDC for Terraform; GHCR via `GITHUB_TOKEN`; optional registry secrets |
+| Image supply chain | Provenance + SBOM attestation, cosign keyless signing, Trivy SARIF → code scanning |
+| Build args | `SECRET_BUILD_ARGS` is for public SPA config only — never bake real credentials into images |
+| OpenAPI gate | Fail closed on probe errors; `treat-registry-denied-as-missing` documents the GHCR first-publish tradeoff |
+| Cleanup | Cache deletion is **opt-in** (`delete-caches: false` by default) |
+
+## Governance
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the change process, deprecation policy, and ownership model. `.github/CODEOWNERS` requires maintainer review on every path.

@@ -1,0 +1,119 @@
+name: Sync Labels (Reusable)
+
+# Upserts a repository's issue labels from a YAML file so the label taxonomy is
+# version-controlled and reviewable. Labels present in the repo but absent from
+# the file are left alone — this workflow never deletes.
+#
+# Expected file shape (a list of objects):
+#   - name: "area:data"
+#     color: "0e8a16"
+#     description: "Seed data and fixtures"
+#
+# Required caller permissions:
+#   contents: read
+#   issues: write
+#
+# No top-level concurrency here — reusable workflows inherit github.workflow
+# from the caller; declaring the same group in both self-deadlocks. Put
+# concurrency on the caller only.
+
+on:
+  workflow_call:
+    inputs:
+      labels-file:
+        description: "Path to the YAML label definitions, relative to the repository root."
+        required: false
+        type: string
+        default: ".github/labels.yml"
+      dry-run:
+        description: "Print what would be upserted without calling the API. Run this first when adopting."
+        required: false
+        type: boolean
+        default: false
+      runs-on:
+        description: "Runner label(s) for the job. Needs `gh` and `yq` on PATH (both ship on GitHub-hosted Ubuntu runners)."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+    outputs:
+      label-count:
+        description: "Number of labels processed."
+        value: ${{ jobs.sync.outputs.label_count }}
+
+jobs:
+  sync:
+    name: Upsert labels
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      label_count: ${{ steps.sync.outputs.label-count }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Sync labels
+        id: sync
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABELS_FILE: ${{ inputs.labels-file }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "$LABELS_FILE" ]; then
+            echo "::error title=Labels::${LABELS_FILE} not found"
+            exit 1
+          fi
+          if ! command -v yq >/dev/null 2>&1; then
+            echo "::error title=Labels::yq is not on PATH — use a runner image that ships it, or install it in the caller"
+            exit 1
+          fi
+
+          KIND="$(yq 'tag' "$LABELS_FILE")"
+          if [ "$KIND" != "!!seq" ]; then
+            echo "::error title=Labels::${LABELS_FILE} must be a YAML list of {name, color, description} objects (parsed as ${KIND})"
+            exit 1
+          fi
+          COUNT="$(yq 'length' "$LABELS_FILE")"
+          if ! [ "$COUNT" -gt 0 ] 2>/dev/null; then
+            echo "::error title=Labels::${LABELS_FILE} is an empty list — nothing to sync"
+            exit 1
+          fi
+          echo "::notice title=Labels::Syncing ${COUNT} label(s) from ${LABELS_FILE} (dry-run=${DRY_RUN})"
+
+          {
+            echo "### Label sync"
+            echo ""
+            echo "| Label | Color | Action |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for i in $(seq 0 $((COUNT - 1))); do
+            name="$(yq -r ".[$i].name" "$LABELS_FILE")"
+            color="$(yq -r ".[$i].color" "$LABELS_FILE")"
+            desc="$(yq -r ".[$i].description // \"\"" "$LABELS_FILE")"
+
+            if [ -z "$name" ] || [ "$name" = "null" ]; then
+              echo "::error title=Labels::Entry ${i} in ${LABELS_FILE} has no name"
+              exit 1
+            fi
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "would upsert: ${name} (#${color})"
+              echo "| \`${name}\` | \`${color}\` | would upsert |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            echo "::group::${name}"
+            gh label create "$name" --color "$color" --description "$desc" --force
+            echo "::endgroup::"
+            echo "| \`${name}\` | \`${color}\` | upserted |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo "label-count=${COUNT}" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Labels::${COUNT} label(s) processed"

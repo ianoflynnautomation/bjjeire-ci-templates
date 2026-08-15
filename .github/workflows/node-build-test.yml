@@ -1,0 +1,289 @@
+name: Node Build & Test (Reusable)
+
+# Reusable golden path for Node/JS jobs: container-first toolchain, node_modules
+# cache, `npm ci`, then an ordered list of caller-supplied commands, with
+# optional artifact download in and artifact upload out.
+#
+# One job, one purpose — call it once per logical check (lint+unit, build,
+# coverage, browser tests, contract generation) so failures stay attributable
+# and the jobs run in parallel.
+#
+# Required caller permissions:
+#   contents: read
+#
+# The container image is the single source of truth for the Node version; there
+# is no setup-node step. Set container-image to an empty string to run directly
+# on the host runner instead.
+#
+# No top-level concurrency here — reusable workflows inherit github.workflow
+# from the caller; declaring the same group in both self-deadlocks. Put
+# concurrency on the caller only.
+#
+# The node_modules cache is inlined rather than delegated to
+# actions/setup-node-cached: a relative `uses: ./actions/...` inside a reusable
+# workflow resolves against the *caller* repo, not this one.
+
+on:
+  workflow_call:
+    inputs:
+      commands:
+        description: >-
+          Newline-separated shell commands run in order from working-directory,
+          each wrapped in its own ::group::. The first non-zero exit fails the
+          job. Blank lines are ignored.
+        required: true
+        type: string
+      job-name:
+        description: "Display name for the job, so several calls are distinguishable in the checks list."
+        required: false
+        type: string
+        default: "Node Build & Test"
+      working-directory:
+        description: "Directory containing package.json / the lockfile. All commands run here."
+        required: false
+        type: string
+        default: "."
+      container-image:
+        description: "Container image providing the Node toolchain. Empty string runs on the host runner instead."
+        required: false
+        type: string
+        default: "node:22-bookworm-slim"
+      runs-on:
+        description: "Runner label(s) hosting the job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      install:
+        description: "Run install-command after restoring the cache."
+        required: false
+        type: boolean
+        default: true
+      install-command:
+        description: "Dependency install command (e.g. `npm ci`, `yarn install --immutable`, `pnpm install --frozen-lockfile`)."
+        required: false
+        type: string
+        default: "npm ci"
+      cache-key-prefix:
+        description: "Prefix for the node_modules cache key — segment monorepo caches per package."
+        required: false
+        type: string
+        default: "node"
+      env-vars:
+        description: >-
+          Newline-separated KEY=VALUE pairs exported to every command. For
+          non-sensitive configuration only; use the env-vars secret for values
+          that must be masked.
+        required: false
+        type: string
+        default: ""
+      download-artifact-name:
+        description: "Artifact downloaded before the commands run (e.g. a contract produced by an earlier job). Empty skips the download."
+        required: false
+        type: string
+        default: ""
+      download-artifact-path:
+        description: "Destination path for the downloaded artifact, relative to the workspace."
+        required: false
+        type: string
+        default: "."
+      artifact-name:
+        description: "Name of the artifact uploaded after the commands. Empty uploads nothing."
+        required: false
+        type: string
+        default: ""
+      artifact-path:
+        description: "Newline-separated paths/globs uploaded as artifact-name, relative to the workspace."
+        required: false
+        type: string
+        default: ""
+      artifact-if-no-files-found:
+        description: "Behaviour when artifact-path matches nothing (error|warn|ignore)."
+        required: false
+        type: string
+        default: "error"
+      upload-artifact-always:
+        description: "Upload the artifact even when the commands failed — use for coverage and test reports."
+        required: false
+        type: boolean
+        default: false
+      failure-artifact-name:
+        description: "Name of the diagnostics artifact uploaded only on failure (traces, screenshots). Empty uploads nothing."
+        required: false
+        type: string
+        default: ""
+      failure-artifact-path:
+        description: "Newline-separated paths/globs uploaded as failure-artifact-name, relative to the workspace."
+        required: false
+        type: string
+        default: ""
+      artifact-retention-days:
+        description: "Retention in days for both uploaded artifacts."
+        required: false
+        type: number
+        default: 7
+      timeout-minutes:
+        description: "Job timeout in minutes."
+        required: false
+        type: number
+        default: 15
+    secrets:
+      env-vars:
+        description: >-
+          Newline-separated KEY=VALUE pairs exported to every command, with each
+          value registered with ::add-mask::. Use for tokens; note that anything
+          baked into a client bundle is public regardless of masking.
+        required: false
+    outputs:
+      commands-successful:
+        description: "true when every command exited zero."
+        value: ${{ jobs.run.outputs.commands_successful }}
+
+jobs:
+  run:
+    name: ${{ inputs.job-name }}
+    runs-on: ${{ inputs.runs-on }}
+    container: ${{ inputs.container-image }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    outputs:
+      commands_successful: ${{ steps.commands.outcome == 'success' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Cache Node modules
+        id: node_cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ inputs.working-directory }}/node_modules
+          key: ${{ runner.os }}-${{ inputs.cache-key-prefix }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory), format('{0}/yarn.lock', inputs.working-directory), format('{0}/pnpm-lock.yaml', inputs.working-directory)) }}
+          restore-keys: |
+            ${{ runner.os }}-${{ inputs.cache-key-prefix }}-
+
+      - name: Install dependencies
+        if: inputs.install
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+          CACHE_HIT: ${{ steps.node_cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          echo "::group::${INSTALL_COMMAND}"
+          bash -c "$INSTALL_COMMAND"
+          echo "::endgroup::"
+          echo "::notice title=Dependencies::${INSTALL_COMMAND} complete (cache-hit=${CACHE_HIT:-false})"
+
+      - name: Export environment
+        shell: bash
+        env:
+          PLAIN_ENV_VARS: ${{ inputs.env-vars }}
+          SECRET_ENV_VARS: ${{ secrets.env-vars }}
+        run: |
+          set -euo pipefail
+          write_vars() {
+            local mask="$1" payload="$2" count=0
+            if [ -z "${payload//[[:space:]]/}" ]; then
+              return 0
+            fi
+            while IFS= read -r line; do
+              if [ -z "${line//[[:space:]]/}" ]; then continue; fi
+              case "$line" in
+                *=*) ;;
+                *) echo "::error title=Environment::Not a KEY=VALUE pair: ${line%%=*}"; exit 1 ;;
+              esac
+              if [ "$mask" = "true" ]; then
+                echo "::add-mask::${line#*=}"
+              fi
+              printf '%s\n' "$line" >> "$GITHUB_ENV"
+              count=$((count + 1))
+            done <<< "$payload"
+            echo "::notice title=Environment::Exported ${count} $([ "$mask" = "true" ] && echo masked || echo plain) variable(s)"
+          }
+          write_vars false "$PLAIN_ENV_VARS"
+          write_vars true "$SECRET_ENV_VARS"
+
+      - name: Download input artifact
+        if: inputs.download-artifact-name != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ inputs.download-artifact-name }}
+          path: ${{ inputs.download-artifact-path }}
+
+      - name: Run commands
+        id: commands
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          COMMANDS: ${{ inputs.commands }}
+          JOB_NAME: ${{ inputs.job-name }}
+        run: |
+          set -euo pipefail
+          mapfile -t CMDS <<< "$COMMANDS"
+          RAN=0
+          for cmd in "${CMDS[@]}"; do
+            if [ -z "${cmd//[[:space:]]/}" ]; then
+              continue
+            fi
+            echo "::group::${cmd}"
+            if ! bash -c "$cmd"; then
+              echo "::endgroup::"
+              echo "::error title=${JOB_NAME}::Command failed: ${cmd}"
+              exit 1
+            fi
+            echo "::endgroup::"
+            RAN=$((RAN + 1))
+          done
+          if [ "$RAN" -eq 0 ]; then
+            echo "::error title=${JOB_NAME}::No commands to run — the commands input was empty"
+            exit 1
+          fi
+          echo "::notice title=${JOB_NAME}::${RAN} command(s) succeeded"
+
+      - name: Upload artifact
+        if: ${{ inputs.artifact-name != '' && (success() || inputs.upload-artifact-always) }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          if-no-files-found: ${{ inputs.artifact-if-no-files-found }}
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+      - name: Upload failure diagnostics
+        if: ${{ failure() && inputs.failure-artifact-name != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ inputs.failure-artifact-name }}
+          path: ${{ inputs.failure-artifact-path }}
+          if-no-files-found: ignore
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+      - name: Write build summary
+        if: always()
+        shell: bash
+        env:
+          JOB_NAME: ${{ inputs.job-name }}
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          CONTAINER_IMAGE: ${{ inputs.container-image }}
+          COMMANDS: ${{ inputs.commands }}
+          OUTCOME: ${{ steps.commands.outcome }}
+        run: |
+          {
+            echo "### ${JOB_NAME}"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Directory | \`${WORKING_DIRECTORY}\` |"
+            echo "| Toolchain | \`${CONTAINER_IMAGE:-host runner}\` |"
+            echo "| Result | ${OUTCOME} |"
+            echo ""
+            echo "<details><summary>Commands</summary>"
+            echo ""
+            echo '```sh'
+            printf '%s\n' "$COMMANDS"
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"

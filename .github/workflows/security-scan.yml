@@ -1,0 +1,232 @@
+name: Security Scan (Reusable)
+
+# Language-agnostic security gate: dependency review, secret scanning, and SAST.
+# Each check is independently toggleable so a caller can adopt them one at a
+# time; the jobs are independent and run in parallel.
+#
+# Required caller permissions — grant all three. Job-level `permissions` are
+# static and cannot depend on an input, and conditional jobs still need the
+# superset at the caller, so toggling a check off does not drop its requirement:
+#   contents: read
+#   pull-requests: write   # dependency-review job
+#   security-events: write # sast job (required even when sast-upload-sarif: false)
+#
+# No top-level concurrency here — reusable workflows inherit github.workflow
+# from the caller; declaring the same group in both self-deadlocks. Put
+# concurrency on the caller only.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label(s) for every job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+      dependency-review:
+        description: "Run actions/dependency-review-action. Only meaningful on pull_request events; skipped otherwise."
+        required: false
+        type: boolean
+        default: true
+      dependency-review-fail-on-severity:
+        description: "Minimum vulnerability severity that fails the run (low|moderate|high|critical)."
+        required: false
+        type: string
+        default: "high"
+      dependency-review-comment-summary:
+        description: "Post the dependency review summary as a PR comment (always|on-failure|never). Needs pull-requests: write."
+        required: false
+        type: string
+        default: "on-failure"
+      dependency-review-allow-licenses:
+        description: "Comma-separated SPDX allow-list. Empty disables license checking."
+        required: false
+        type: string
+        default: ""
+
+      secret-scan:
+        description: "Run gitleaks over the full history."
+        required: false
+        type: boolean
+        default: true
+      secret-scan-config:
+        description: "Path to a gitleaks config file (.gitleaks.toml). Empty uses the built-in ruleset."
+        required: false
+        type: string
+        default: ""
+      secret-scan-fetch-depth:
+        description: "Checkout depth for the secret scan. 0 (full history) is required to catch secrets in older commits."
+        required: false
+        type: number
+        default: 0
+
+      sast:
+        description: "Run a Semgrep scan."
+        required: false
+        type: boolean
+        default: true
+      sast-configs:
+        description: >-
+          Space-separated Semgrep rulesets, each passed as --config
+          (e.g. 'p/java p/typescript p/react'). Defaults to the language-agnostic
+          CI pack; override per repo rather than adding language defaults here.
+        required: false
+        type: string
+        default: "p/ci"
+      sast-severity:
+        description: "Minimum Semgrep severity reported (INFO|WARNING|ERROR)."
+        required: false
+        type: string
+        default: "ERROR"
+      sast-version:
+        description: "Semgrep version installed via pipx — pinned so results are reproducible."
+        required: false
+        type: string
+        default: "1.168.0"
+      sast-enforce:
+        description: "When false, Semgrep findings are reported but do not fail the run."
+        required: false
+        type: boolean
+        default: false
+      sast-upload-sarif:
+        description: "Upload Semgrep results to code scanning as SARIF. Needs security-events: write."
+        required: false
+        type: boolean
+        default: false
+      sast-paths:
+        description: "Space-separated paths scanned by Semgrep."
+        required: false
+        type: string
+        default: "."
+    secrets:
+      gitleaks-license:
+        description: "GITLEAKS_LICENSE, required by gitleaks-action for organization-owned repositories."
+        required: false
+
+jobs:
+  dependency-review:
+    name: Dependency Review
+    if: ${{ inputs.dependency-review && github.event_name == 'pull_request' }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
+        with:
+          fail-on-severity: ${{ inputs.dependency-review-fail-on-severity }}
+          comment-summary-in-pr: ${{ inputs.dependency-review-comment-summary }}
+          allow-licenses: ${{ inputs.dependency-review-allow-licenses }}
+
+  secret-scan:
+    name: Secret Scan
+    if: ${{ inputs.secret-scan }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: ${{ inputs.secret-scan-fetch-depth }}
+          persist-credentials: false
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_LICENSE: ${{ secrets.gitleaks-license }}
+          GITLEAKS_CONFIG: ${{ inputs.secret-scan-config }}
+      - name: Write secret scan summary
+        if: always()
+        shell: bash
+        env:
+          CONFIG: ${{ inputs.secret-scan-config }}
+        run: |
+          {
+            echo "### Secret scan"
+            echo ""
+            echo "| Check | Scope |"
+            echo "| --- | --- |"
+            echo "| gitleaks | full history (config: \`${CONFIG:-built-in}\`) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  sast:
+    name: SAST (Semgrep)
+    if: ${{ inputs.sast }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Semgrep scan
+        id: semgrep
+        continue-on-error: ${{ !inputs.sast-enforce }}
+        shell: bash
+        env:
+          SEMGREP_VERSION: ${{ inputs.sast-version }}
+          SEMGREP_CONFIGS: ${{ inputs.sast-configs }}
+          SEMGREP_SEVERITY: ${{ inputs.sast-severity }}
+          SEMGREP_PATHS: ${{ inputs.sast-paths }}
+          UPLOAD_SARIF: ${{ inputs.sast-upload-sarif }}
+        run: |
+          set -euo pipefail
+          read -r -a configs <<< "$SEMGREP_CONFIGS"
+          read -r -a paths <<< "$SEMGREP_PATHS"
+          args=()
+          for config in "${configs[@]}"; do
+            args+=(--config "$config")
+          done
+          if [ "$UPLOAD_SARIF" = "true" ]; then
+            args+=(--sarif --output semgrep.sarif)
+          else
+            args+=(--quiet)
+          fi
+          echo "::group::semgrep scan (${SEMGREP_CONFIGS})"
+          pipx run "semgrep==${SEMGREP_VERSION}" scan \
+            "${args[@]}" \
+            --severity "$SEMGREP_SEVERITY" \
+            --error \
+            "${paths[@]}"
+          echo "::endgroup::"
+          echo "::notice title=SAST::Semgrep found no ${SEMGREP_SEVERITY}-severity findings"
+
+      - name: Upload Semgrep SARIF
+        if: ${{ always() && inputs.sast-upload-sarif && hashFiles('semgrep.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      - name: Write SAST summary
+        if: always()
+        shell: bash
+        env:
+          CONFIGS: ${{ inputs.sast-configs }}
+          SEVERITY: ${{ inputs.sast-severity }}
+          ENFORCE: ${{ inputs.sast-enforce }}
+          OUTCOME: ${{ steps.semgrep.outcome }}
+        run: |
+          {
+            echo "### SAST"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Rulesets | \`${CONFIGS}\` |"
+            echo "| Severity | \`${SEVERITY}\` |"
+            echo "| Enforced | ${ENFORCE} |"
+            echo "| Result | ${OUTCOME} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${OUTCOME}" = "failure" ] && [ "${ENFORCE}" != "true" ]; then
+            echo "::warning title=SAST::Semgrep reported findings but sast-enforce is false — not failing the run"
+          fi

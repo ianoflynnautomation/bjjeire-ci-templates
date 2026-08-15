@@ -1,0 +1,107 @@
+
+name: 'Sticky Comment'
+description: 'Creates or updates a single marker-identified comment on an issue or pull request, so repeated runs edit one comment instead of spamming the thread. Body is passed through env — never interpolated into a script — so untrusted content is safe.'
+
+inputs:
+  marker:
+    description: 'Hidden HTML marker identifying this comment, e.g. "<!-- pr-env -->". Must be unique per comment purpose within the repo.'
+    required: true
+  body:
+    description: 'Comment body (Markdown). The marker is prepended automatically if the body does not already contain it.'
+    required: true
+  issue-number:
+    description: 'Issue or PR number to comment on. Defaults to the number from the triggering event.'
+    required: false
+    default: ${{ github.event.issue.number || github.event.pull_request.number }}
+  token:
+    description: 'Token used to read and write comments. Needs issues: write (PR comments are issue comments).'
+    required: false
+    default: ${{ github.token }}
+  delete-on-empty:
+    description: 'When "true" and the body is empty, delete any existing sticky comment instead of writing one.'
+    required: false
+    default: 'false'
+  summary-title:
+    description: 'Heading used in the step summary. Set to an empty string to skip the summary.'
+    required: false
+    default: 'Sticky comment'
+
+outputs:
+  comment-id:
+    description: 'ID of the created/updated comment, empty when nothing was written.'
+    value: ${{ steps.comment.outputs.comment-id }}
+  comment-url:
+    description: 'HTML URL of the created/updated comment, empty when nothing was written.'
+    value: ${{ steps.comment.outputs.comment-url }}
+  action:
+    description: 'What happened: created | updated | deleted | noop.'
+    value: ${{ steps.comment.outputs.action }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Upsert sticky comment
+      id: comment
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+      env:
+        MARKER: ${{ inputs.marker }}
+        BODY: ${{ inputs.body }}
+        ISSUE_NUMBER: ${{ inputs.issue-number }}
+        DELETE_ON_EMPTY: ${{ inputs.delete-on-empty }}
+        SUMMARY_TITLE: ${{ inputs.summary-title }}
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const marker = process.env.MARKER;
+          const raw = process.env.BODY ?? '';
+          const issue_number = Number(process.env.ISSUE_NUMBER);
+          const { owner, repo } = context.repo;
+
+          if (!marker) {
+            core.setFailed('sticky-comment: `marker` is required');
+            return;
+          }
+          if (!Number.isInteger(issue_number) || issue_number <= 0) {
+            core.setFailed('sticky-comment: could not resolve an issue/PR number — pass `issue-number` explicitly');
+            return;
+          }
+
+          const comments = await github.paginate(github.rest.issues.listComments, {
+            owner, repo, issue_number, per_page: 100,
+          });
+          const existing = comments.find((c) => c.body && c.body.includes(marker));
+
+          let result = 'noop';
+          let comment = null;
+
+          if (!raw.trim() && process.env.DELETE_ON_EMPTY === 'true') {
+            if (existing) {
+              await github.rest.issues.deleteComment({ owner, repo, comment_id: existing.id });
+              result = 'deleted';
+            }
+          } else {
+            const body = raw.includes(marker) ? raw : `${marker}\n${raw}`;
+            if (existing) {
+              ({ data: comment } = await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body,
+              }));
+              result = 'updated';
+            } else {
+              ({ data: comment } = await github.rest.issues.createComment({
+                owner, repo, issue_number, body,
+              }));
+              result = 'created';
+            }
+          }
+
+          core.setOutput('action', result);
+          core.setOutput('comment-id', comment ? String(comment.id) : '');
+          core.setOutput('comment-url', comment ? comment.html_url : '');
+          core.notice(`${result} sticky comment on #${issue_number}`, { title: 'Sticky comment' });
+
+          if (process.env.SUMMARY_TITLE) {
+            await core.summary
+              .addHeading(process.env.SUMMARY_TITLE, 3)
+              .addRaw(comment ? `[#${issue_number} comment](${comment.html_url}) ${result}` : `#${issue_number}: ${result}`)
+              .write();
+          }

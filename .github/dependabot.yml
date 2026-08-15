@@ -25,3 +25,23 @@ updates:
     directory: "/actions/openapi-breaking-gate"
     schedule:
       interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/check-required-jobs"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/detect-changes"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/sticky-comment"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/oci-push-artifact"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/maven-openapi-export"
+    schedule:
+      interval: weekly

@@ -1,0 +1,59 @@
+name: 'Check Required Jobs'
+description: 'Aggregate gate for branch protection: fails when any needed job failed or was cancelled, passes when jobs succeeded or were intentionally skipped by path filters. Language- and project-agnostic — the caller supplies toJson(needs).'
+
+inputs:
+  needs-json:
+    description: 'The caller job''s needs context, passed as toJson(needs).'
+    required: true
+  summary-title:
+    description: 'Heading used in the step summary and log annotations.'
+    required: false
+    default: 'Required checks'
+  fail-on:
+    description: 'Space-separated job results that fail the gate. Add "skipped" to require every job to run.'
+    required: false
+    default: 'failure cancelled'
+
+outputs:
+  failed-jobs:
+    description: 'Space-separated names of the jobs whose result matched fail-on. Empty when the gate passed.'
+    value: ${{ steps.gate.outputs.failed-jobs }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Verify required jobs succeeded or were intentionally skipped
+      id: gate
+      shell: bash
+      env:
+        NEEDS_JSON: ${{ inputs.needs-json }}
+        TITLE: ${{ inputs.summary-title }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        set -uo pipefail
+        echo "::group::needs context"
+        echo "$NEEDS_JSON" | jq .
+        echo "::endgroup::"
+
+        FAIL_ON_JSON="$(printf '%s' "$FAIL_ON" | jq -R 'split(" ") | map(select(length > 0))')"
+        FAILED="$(echo "$NEEDS_JSON" | jq -r --argjson bad "$FAIL_ON_JSON" \
+          'to_entries[] | select(.value.result as $r | $bad | index($r)) | .key')"
+
+        {
+          echo "### ${TITLE}"
+          echo ""
+          echo "| Job | Result |"
+          echo "| --- | --- |"
+          echo "$NEEDS_JSON" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        echo "failed-jobs=$(printf '%s' "$FAILED" | tr '\n' ' ' | sed 's/ *$//')" >> "$GITHUB_OUTPUT"
+
+        if [ -n "$FAILED" ]; then
+          echo "::error title=${TITLE}::One or more required jobs did not pass"
+          printf '%s\n' "$FAILED" | while IFS= read -r job; do
+            echo "  - ${job}"
+          done
+          exit 1
+        fi
+        echo "::notice title=${TITLE}::All required jobs succeeded or were skipped by path filter"

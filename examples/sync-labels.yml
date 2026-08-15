@@ -1,0 +1,40 @@
+# Example caller: keep repository labels in sync with a version-controlled file.
+# Copy into your repo as .github/workflows/labels.yml and commit .github/labels.yml.
+#
+# .github/labels.yml shape:
+#   - name: "area:data"
+#     color: "0e8a16"
+#     description: "Seed data and fixtures"
+name: Sync labels
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/labels.yml"
+      - ".github/workflows/labels.yml"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print what would be upserted without calling the API"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-labels
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Upsert labels
+    permissions:
+      contents: read
+      issues: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/sync-labels.yml@v1
+    with:
+      labels-file: .github/labels.yml
+      dry-run: ${{ inputs.dry_run || false }}

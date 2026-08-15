@@ -1,0 +1,117 @@
+# Example caller: PR validation for a Node/React app using the shared
+# node-build-test workflow plus the path-filter and aggregate-gate composites.
+# Copy into your repo as .github/workflows/ci-pr.yml and adjust paths.
+name: CI PR Validation
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  detect-changes:
+    name: Detect Changed Paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changes: ${{ steps.changes.outputs.changes }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - id: changes
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/detect-changes@v1
+        with:
+          filters: |
+            frontend:
+              - 'src/my-app/**'
+            api:
+              - 'src/my-api/**'
+
+  checks:
+    name: Frontend Checks
+    needs: detect-changes
+    if: contains(fromJSON(needs.detect-changes.outputs.changes), 'frontend')
+    permissions:
+      contents: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/node-build-test.yml@v1
+    with:
+      job-name: Lint + Unit Tests
+      working-directory: src/my-app
+      container-image: node:22-bookworm-slim
+      cache-key-prefix: my-app
+      env-vars: |
+        HUSKY=0
+      commands: |
+        npx tsc --noEmit
+        npx eslint src --max-warnings 0
+        npx prettier --check src/
+        npm test
+
+  build:
+    name: Build Frontend
+    needs: detect-changes
+    if: contains(fromJSON(needs.detect-changes.outputs.changes), 'frontend')
+    permissions:
+      contents: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/node-build-test.yml@v1
+    with:
+      job-name: Production Build
+      working-directory: src/my-app
+      cache-key-prefix: my-app
+      commands: npm run build
+
+  coverage:
+    name: Coverage Gate
+    needs: [checks, build]
+    permissions:
+      contents: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/node-build-test.yml@v1
+    with:
+      job-name: Integration Tests + Coverage
+      working-directory: src/my-app
+      cache-key-prefix: my-app
+      commands: npm run test:coverage
+      artifact-name: frontend-coverage
+      artifact-path: src/my-app/coverage
+      upload-artifact-always: true
+      artifact-retention-days: 7
+
+  browser:
+    name: Browser Tests
+    needs: [checks, build]
+    permissions:
+      contents: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/node-build-test.yml@v1
+    with:
+      job-name: Vitest Browser Suite
+      working-directory: src/my-app
+      container-image: mcr.microsoft.com/playwright:v1.61.0-noble
+      cache-key-prefix: my-app
+      timeout-minutes: 20
+      commands: npm run test:browser
+      failure-artifact-name: playwright-diagnostics
+      failure-artifact-path: |
+        src/my-app/src/**/__traces__
+        src/my-app/src/**/__screenshots__
+
+  pr-complete:
+    name: PR Checks Complete
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [detect-changes, checks, build, coverage, browser]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: ianoflynnautomation/bjjeire-ci-templates/actions/check-required-jobs@v1
+        with:
+          needs-json: ${{ toJson(needs) }}
+          summary-title: PR checks

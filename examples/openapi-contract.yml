@@ -1,0 +1,118 @@
+name: OpenAPI Contract
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CONTRACT_IMAGE: ghcr.io/${{ github.repository_owner }}/my-api-contract
+
+jobs:
+  generate:
+    name: Generate Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up JDK
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95  # v5
+        with:
+          java-version: "21"
+          distribution: temurin
+          cache: maven
+          cache-dependency-path: src/my-api/pom.xml
+      - id: contract
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/maven-openapi-export@v1
+        with:
+          working-directory: src/my-api
+          it-test: OpenApiContractIT
+          output-path: ${{ github.workspace }}/artifacts/openapi/openapi-v1.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: openapi-contract
+          path: artifacts/openapi/openapi-v1.json
+          if-no-files-found: error
+          retention-days: 30
+
+  gate:
+    name: Breaking-Change Gate
+    runs-on: ubuntu-latest
+    needs: generate
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: openapi-contract
+          path: artifacts/openapi
+      - uses: ianoflynnautomation/bjjeire-ci-templates/actions/openapi-breaking-gate@v1
+        with:
+          current-spec: artifacts/openapi/openapi-v1.json
+          image: ${{ env.CONTRACT_IMAGE }}
+          token: ${{ github.token }}
+          user: ${{ github.actor }}
+
+  publish:
+    name: Publish Contract
+    runs-on: ubuntu-latest
+    needs: gate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: openapi-contract
+          path: artifacts/openapi
+      - uses: ianoflynnautomation/bjjeire-ci-templates/actions/oci-push-artifact@v1
+        with:
+          file: artifacts/openapi/openapi-v1.json
+          image: ${{ env.CONTRACT_IMAGE }}
+          artifact-type: application/vnd.example.openapi.v1
+          media-type: application/vnd.oai.openapi+json
+          tags: |
+            ${{ github.sha }}
+            main
+            latest
+          password: ${{ github.token }}
+
+  comment:
+    name: Report on PR
+    runs-on: ubuntu-latest
+    needs: [generate, gate]
+    if: always() && github.event_name == 'pull_request'
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: ianoflynnautomation/bjjeire-ci-templates/actions/sticky-comment@v1
+        with:
+          marker: "<!-- openapi-contract -->"
+          body: |
+            ## OpenAPI contract
+
+            | Stage | Result |
+            |---|---|
+            | Generate | `${{ needs.generate.result }}` |
+            | Breaking-change gate | `${{ needs.gate.result }}` |

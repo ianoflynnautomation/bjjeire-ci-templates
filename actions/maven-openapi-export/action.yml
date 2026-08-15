@@ -1,0 +1,112 @@
+name: 'Export OpenAPI Contract (Maven)'
+description: 'Runs a Maven integration test that serves the application and writes its OpenAPI document to a caller-chosen path, then verifies the result is a non-empty, structurally valid OpenAPI JSON file. Pairs with actions/openapi-breaking-gate and actions/oci-push-artifact.'
+
+inputs:
+  output-path:
+    description: 'Where the OpenAPI JSON should be written. Relative paths resolve against working-directory. Exported to the test through the variable named by output-path-env.'
+    required: true
+  working-directory:
+    description: 'Directory containing the Maven module pom.xml.'
+    required: false
+    default: '.'
+  it-test:
+    description: 'Failsafe integration test class that serves and exports the contract (passed as -Dit.test). Leave empty to run the whole failsafe suite.'
+    required: false
+    default: ''
+  output-path-env:
+    description: 'Name of the environment variable the integration test reads the target path from.'
+    required: false
+    default: 'OPENAPI_ARTIFACT_PATH'
+  maven-goals:
+    description: 'Maven goals/phases that trigger the failsafe suite.'
+    required: false
+    default: 'verify'
+  maven-arguments:
+    description: 'Extra Maven arguments (shell-split). The default skips the surefire unit suite so only the exporting IT runs.'
+    required: false
+    default: '-Dtest=none -Dsurefire.failIfNoSpecifiedTests=false'
+  summary-title:
+    description: 'Heading used in the step summary. Set to an empty string to skip the summary.'
+    required: false
+    default: 'OpenAPI contract'
+
+outputs:
+  path:
+    description: 'Absolute path of the generated artifact.'
+    value: ${{ steps.export.outputs.path }}
+  bytes:
+    description: 'Size of the generated artifact in bytes.'
+    value: ${{ steps.export.outputs.bytes }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Export OpenAPI artifact
+      id: export
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        OUTPUT_PATH: ${{ inputs.output-path }}
+        OUTPUT_PATH_ENV: ${{ inputs.output-path-env }}
+        IT_TEST: ${{ inputs.it-test }}
+        MAVEN_GOALS: ${{ inputs.maven-goals }}
+        MAVEN_ARGUMENTS: ${{ inputs.maven-arguments }}
+      run: |
+        set -euo pipefail
+
+        case "$OUTPUT_PATH" in
+          /*) TARGET="$OUTPUT_PATH" ;;
+          *)  TARGET="$(pwd)/${OUTPUT_PATH}" ;;
+        esac
+        mkdir -p "$(dirname "$TARGET")"
+        export "${OUTPUT_PATH_ENV}=${TARGET}"
+
+        read -r -a GOALS <<< "$MAVEN_GOALS"
+        EXTRA=()
+        if [ -n "$MAVEN_ARGUMENTS" ]; then
+          read -r -a EXTRA <<< "$MAVEN_ARGUMENTS"
+        fi
+        if [ -n "$IT_TEST" ]; then
+          EXTRA+=("-Dit.test=${IT_TEST}")
+        fi
+
+        echo "::group::mvn ${MAVEN_GOALS} (OpenAPI export)"
+        mvn --batch-mode --no-transfer-progress "${GOALS[@]}" "${EXTRA[@]}"
+        echo "::endgroup::"
+
+        if [ ! -s "$TARGET" ]; then
+          echo "::error title=OpenAPI contract::Artifact was not generated at ${TARGET}"
+          exit 1
+        fi
+        if command -v jq >/dev/null 2>&1; then
+          if ! jq -e '.openapi and .paths' "$TARGET" >/dev/null; then
+            echo "::error title=OpenAPI contract::Artifact at ${TARGET} is not a valid OpenAPI document"
+            exit 1
+          fi
+        elif ! grep -q '"openapi"' "$TARGET" || ! grep -q '"paths"' "$TARGET"; then
+          echo "::error title=OpenAPI contract::Artifact at ${TARGET} is missing openapi/paths members"
+          exit 1
+        fi
+
+        BYTES="$(wc -c < "$TARGET" | tr -d ' ')"
+        {
+          echo "path=${TARGET}"
+          echo "bytes=${BYTES}"
+        } >> "$GITHUB_OUTPUT"
+        echo "::notice title=OpenAPI contract::Generated ${BYTES} bytes at ${TARGET}"
+
+    - name: Write contract summary
+      if: always() && inputs.summary-title != ''
+      shell: bash
+      env:
+        TITLE: ${{ inputs.summary-title }}
+        ARTIFACT_PATH: ${{ steps.export.outputs.path }}
+        BYTES: ${{ steps.export.outputs.bytes }}
+      run: |
+        {
+          echo "### ${TITLE}"
+          echo ""
+          echo "| File | Size (bytes) |"
+          echo "| --- | --- |"
+          echo "| \`$(basename "${ARTIFACT_PATH:-unknown}")\` | ${BYTES:-0} |"
+        } >> "$GITHUB_STEP_SUMMARY"

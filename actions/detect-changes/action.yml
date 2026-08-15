@@ -1,0 +1,83 @@
+name: 'Detect Changed Paths'
+description: 'Evaluates caller-supplied path filters against the PR/push diff and exposes the matched filter names as a JSON array plus a step summary. The filter definitions stay in the caller — this action owns the mechanics, not the layout of any one repo. Requires the repo to be checked out first.'
+
+inputs:
+  filters:
+    description: >-
+      dorny/paths-filter filter definitions as YAML (a mapping of filter name to
+      a list of globs), or a path to a YAML file containing them. Required —
+      path layouts are repo-specific and must never be baked in here.
+    required: true
+  base:
+    description: 'Git ref the diff is taken against. Defaults to the PR base branch (pull_request) or the previous commit (push).'
+    required: false
+    default: ''
+  ref:
+    description: 'Git ref to compare against base. Defaults to the event''s head ref.'
+    required: false
+    default: ''
+  token:
+    description: 'Token used to query the compare API when the diff cannot be computed locally. Needs contents: read.'
+    required: false
+    default: ${{ github.token }}
+  list-files:
+    description: 'Format for the per-filter file lists (none|csv|json|shell|escape). "none" keeps outputs small.'
+    required: false
+    default: 'none'
+  summary-title:
+    description: 'Heading used in the step summary and log annotations.'
+    required: false
+    default: 'Detected changes'
+
+outputs:
+  changes:
+    description: 'JSON array of the filter names that matched, e.g. ["frontend","api"]. Test it with contains(fromJSON(...), ''frontend'').'
+    value: ${{ steps.filter.outputs.changes }}
+  any-changed:
+    description: '"true" when at least one filter matched, "false" otherwise.'
+    value: ${{ steps.summary.outputs.any-changed }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: filter
+      uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706  # v4.0.2
+      with:
+        filters: ${{ inputs.filters }}
+        base: ${{ inputs.base }}
+        ref: ${{ inputs.ref }}
+        token: ${{ inputs.token }}
+        list-files: ${{ inputs.list-files }}
+
+    - name: Summarize detected changes
+      id: summary
+      shell: bash
+      env:
+        CHANGES: ${{ steps.filter.outputs.changes }}
+        FILTERS: ${{ inputs.filters }}
+        TITLE: ${{ inputs.summary-title }}
+      run: |
+        set -euo pipefail
+        MATCHED="${CHANGES:-[]}"
+        ANY="$(echo "$MATCHED" | jq -r 'length > 0')"
+        echo "any-changed=${ANY}" >> "$GITHUB_OUTPUT"
+
+        # All declared filter names, so the summary shows false rows too. When
+        # `filters` is a file path rather than inline YAML, fall back to the
+        # matched set only.
+        if [ -f "$FILTERS" ]; then
+          ALL="$(yq -o=json 'keys' "$FILTERS" 2>/dev/null || echo "$MATCHED")"
+        else
+          ALL="$(printf '%s' "$FILTERS" | yq -o=json 'keys' 2>/dev/null || echo "$MATCHED")"
+        fi
+
+        {
+          echo "### ${TITLE}"
+          echo ""
+          echo "| Filter | Changed |"
+          echo "| --- | --- |"
+          echo "$ALL" | jq -r --argjson matched "$MATCHED" \
+            '.[] as $f | "| \($f) | \($matched | index($f) != null) |"'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        echo "::notice title=${TITLE}::matched=${MATCHED} any-changed=${ANY}"
