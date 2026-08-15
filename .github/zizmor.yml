@@ -4,6 +4,8 @@ rules:
     ignore:
       - dotnet-build-test.yml
       - node-build-test.yml
+      - playwright-tests.yml
+      - playwright-report.yml
 
   artipacked:
     ignore:

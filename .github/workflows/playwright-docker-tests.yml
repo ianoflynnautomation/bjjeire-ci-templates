@@ -1,0 +1,718 @@
+name: Playwright Tests via Docker Compose (Reusable)
+
+# Sharded Playwright runner that provisions its own stack. Compose brings the
+# application up on the same runner that executes the tests — they cannot be
+# split across jobs, because the stack only exists for the life of that runner.
+#
+# Use playwright-tests.yml instead when the environment already exists.
+#
+# How it works:
+#   1. Build (or reuse) a test-runner image from the test repo's Dockerfile,
+#      tagged by the test-repo commit so any test-code change invalidates it.
+#   2. Per shard: `docker compose up` the caller's stack, wait for health, seed,
+#      then run one Playwright shard inside the runner image on the host network.
+#   3. Merge every shard's blob report, gate, and optionally comment on the PR.
+#
+# Required caller permissions (superset of every job below — GitHub rejects the
+# run at parse time if the caller grants less):
+#   contents: read
+#   actions: read
+#   packages: write        # to push the test-runner image
+#   id-token: write
+#   pull-requests: write   # only when comment-on-pr: true
+#   pages: write           # only when publish-report: true
+#
+# No top-level concurrency here — put it on the caller only.
+#
+# Environment plumbing is generic: pass credentials as newline-separated
+# KEY=VALUE pairs through the `test-env-vars` secret rather than naming one
+# project's secrets in a shared template.
+
+on:
+  workflow_call:
+    inputs:
+      playwright-projects:
+        description: "Newline- or comma-separated Playwright project names to run."
+        required: true
+        type: string
+      base-url:
+        description: "Exported as BASE_URL inside the test container."
+        required: true
+        type: string
+      api-url:
+        description: "Exported as API_URL inside the test container."
+        required: true
+        type: string
+      app-env:
+        description: "Exported as APP_ENV — the profile your Playwright config switches on."
+        required: false
+        type: string
+        default: "docker"
+
+      compose-files:
+        description: >-
+          Newline-separated compose files relative to the caller checkout,
+          stacked left-to-right (later files override earlier ones). Passed to
+          docker compose through COMPOSE_FILE.
+        required: false
+        type: string
+        default: "docker-compose.yml"
+      compose-pre-up-script:
+        description: "Path (relative to the caller checkout) to a bash script run before `docker compose up`. Empty skips it."
+        required: false
+        type: string
+        default: ""
+      compose-health-url:
+        description: "URL polled until it answers before the tests start. Empty skips the wait."
+        required: false
+        type: string
+        default: ""
+      compose-health-timeout-seconds:
+        description: "How long to wait for compose-health-url before failing the shard."
+        required: false
+        type: number
+        default: 120
+      seed-command:
+        description: >-
+          Command run after the stack is healthy and before the tests, e.g.
+          `docker compose run --rm seeder`. Empty skips seeding.
+        required: false
+        type: string
+        default: ""
+      compose-project-prefix:
+        description: >-
+          Prefix for COMPOSE_PROJECT_NAME. The run id, attempt, project, and
+          shard are appended, so concurrent shards on one runner never share
+          networks or volumes.
+        required: false
+        type: string
+        default: "pw"
+
+      runner-image:
+        description: >-
+          OCI reference (without a tag) for the test-runner image built from the
+          test repo. Empty derives `ghcr.io/<owner>/<repo>-playwright`,
+          lowercased.
+        required: false
+        type: string
+        default: ""
+      runner-dockerfile:
+        description: "Dockerfile used to build the test-runner image, relative to the test-repo checkout."
+        required: false
+        type: string
+        default: "Dockerfile"
+      runner-context:
+        description: "Build context for the test-runner image."
+        required: false
+        type: string
+        default: "."
+      runner-workdir:
+        description: >-
+          Working directory inside the test-runner image. The report output
+          directories are bind-mounted under it, so it must match the WORKDIR
+          the Dockerfile sets.
+        required: false
+        type: string
+        default: "/home/pwuser/app"
+
+      test-tags:
+        description: 'Playwright grep filter, e.g. "@smoke". Empty runs everything the projects select.'
+        required: false
+        type: string
+        default: ""
+      shard-total:
+        description: "Default number of parallel shards per project."
+        required: false
+        type: number
+        default: 6
+      project-shard-overrides:
+        description: "Newline-separated `project=count` overrides. Projects not listed use shard-total."
+        required: false
+        type: string
+        default: ""
+      config-map:
+        description: "Newline-separated `project=config-file` pairs. Projects not listed use default-config."
+        required: false
+        type: string
+        default: ""
+      default-config:
+        description: "Playwright config used by any project absent from config-map."
+        required: false
+        type: string
+        default: "playwright.config.ts"
+      env-vars:
+        description: "Newline-separated KEY=VALUE pairs passed into the test container. Non-sensitive values only."
+        required: false
+        type: string
+        default: ""
+      project-env-overrides:
+        description: "Newline-separated `project:KEY=VALUE` entries applied only to shards of that project. An empty value unsets the variable."
+        required: false
+        type: string
+        default: ""
+
+      test-repo:
+        description: "Owner/repo holding the test code. Empty = the caller repo."
+        required: false
+        type: string
+        default: ""
+      test-repo-ref:
+        description: "Git ref of the test repo to check out."
+        required: false
+        type: string
+        default: ""
+      registry:
+        description: "Registry host for the test-runner image."
+        required: false
+        type: string
+        default: "ghcr.io"
+      runs-on:
+        description: "Runner label(s). Needs a Docker daemon — compose runs on this runner."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout in minutes for each shard job."
+        required: false
+        type: number
+        default: 30
+
+      node-image:
+        description: "Container image providing the Node toolchain for the merge job."
+        required: false
+        type: string
+        default: "node:22-bookworm-slim"
+      reporters:
+        description: "Reporters passed to `playwright merge-reports`."
+        required: false
+        type: string
+        default: "html,json,junit,github"
+      upload-junit:
+        description: "Upload the merged JUnit XML. Requires `junit` in reporters."
+        required: false
+        type: boolean
+        default: true
+      fail-on-flaky:
+        description: "Fail the gate when any test passed only after a retry."
+        required: false
+        type: boolean
+        default: false
+      publish-report:
+        description: "Publish the merged HTML report to GitHub Pages."
+        required: false
+        type: boolean
+        default: false
+      comment-on-pr:
+        description: "Post a sticky result comment when the run is attached to a pull request. Requires pull-requests: write."
+        required: false
+        type: boolean
+        default: true
+      artifact-prefix:
+        description: "Prefix for the report artifacts, so two calls in one run do not collide."
+        required: false
+        type: string
+        default: "playwright-docker"
+      trace-retention-days:
+        description: "Retention in days for the failure trace artifacts and compose logs."
+        required: false
+        type: number
+        default: 7
+    secrets:
+      test-env-vars:
+        description: "Newline-separated KEY=VALUE pairs passed into the test container, each value registered with ::add-mask::."
+        required: false
+      registry-password:
+        description: "Registry token for pushing/pulling the test-runner image. Defaults to the job's GITHUB_TOKEN."
+        required: false
+    outputs:
+      status:
+        description: "success | failure — the gated result of the matrix test job."
+        value: ${{ jobs.report.outputs.status }}
+      failed-count:
+        description: "Number of failed tests across all shards (0 on green)."
+        value: ${{ jobs.report.outputs.failed-count }}
+      flaky-count:
+        description: "Number of flaky tests — passed only after a retry."
+        value: ${{ jobs.report.outputs.flaky-count }}
+      report-artifact-name:
+        description: "Name of the merged HTML report artifact."
+        value: ${{ jobs.report.outputs.report-artifact-name }}
+      report-url:
+        description: "Public URL of the published HTML report. Empty unless publish-report ran."
+        value: ${{ jobs.report.outputs.report-url }}
+
+jobs:
+  plan:
+    name: Plan matrix
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Plan matrix
+        id: plan
+        shell: bash
+        env:
+          PROJECTS: ${{ inputs.playwright-projects }}
+          SHARD_TOTAL: ${{ inputs.shard-total }}
+          OVERRIDES: ${{ inputs.project-shard-overrides }}
+          CONFIG_MAP: ${{ inputs.config-map }}
+          DEFAULT_CONFIG: ${{ inputs.default-config }}
+        run: |
+          set -euo pipefail
+          projects_json=$(printf '%s\n' "${PROJECTS//,/$'\n'}" | jq -R -n -c \
+            '[inputs | gsub("^\\s+|\\s+$"; "") | select(length > 0)]')
+          if [ "$(jq 'length' <<< "$projects_json")" -eq 0 ]; then
+            echo "::error title=No projects::The playwright-projects input resolved to an empty list"
+            exit 1
+          fi
+          overrides_json=$(printf '%s\n' "$OVERRIDES" | jq -R -n -c \
+            '[inputs | gsub("\\s"; "") | select(length > 0)
+              | capture("^(?<k>[^=]+)=(?<v>[0-9]+)$") | {(.k): (.v | tonumber)}] | add // {}')
+          config_json=$(printf '%s\n' "$CONFIG_MAP" | jq -R -n -c \
+            '[inputs | gsub("^\\s+|\\s+$"; "") | select(length > 0)
+              | capture("^(?<k>[^=]+)=(?<v>.+)$")
+              | {(.k | gsub("\\s"; "")): (.v | gsub("^\\s+|\\s+$"; ""))}] | add // {}')
+          plan=$(jq -nc \
+            --argjson projects "$projects_json" \
+            --argjson overrides "$overrides_json" \
+            --argjson configs "$config_json" \
+            --argjson defaultShards "$SHARD_TOTAL" \
+            --arg defaultConfig "$DEFAULT_CONFIG" '
+            [ $projects[] | . as $p
+              | { name: $p,
+                  config: (($configs[$p]) // $defaultConfig),
+                  shard_total: (($overrides[$p]) // $defaultShards) } ]')
+          matrix=$(jq -c '[ .[] | . as $e | [range(1; $e.shard_total + 1)]
+                            | .[] | { name: $e.name, config: $e.config, shard: ., shard_total: $e.shard_total } ]' <<< "$plan")
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "::group::Planned matrix"
+          jq -r '.[] | "  \(.name)  shards=\(.shard_total)  config=\(.config)"' <<< "$plan"
+          echo "::endgroup::"
+          echo "::notice title=Matrix planned::$(jq 'length' <<< "$plan") project(s) → $(jq 'length' <<< "$matrix") shard job(s)"
+
+  build-runner:
+    name: Build test-runner image
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      image_ref: ${{ steps.image.outputs.ref }}
+    steps:
+      - name: Checkout test repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ${{ inputs.test-repo }}
+          ref: ${{ inputs.test-repo-ref }}
+          persist-credentials: false
+
+      - name: Compute image ref
+        id: image
+        shell: bash
+        env:
+          RUNNER_IMAGE_INPUT: ${{ inputs.runner-image }}
+          REGISTRY: ${{ inputs.registry }}
+          TEST_REPO: ${{ inputs.test-repo }}
+          FALLBACK_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          image="${RUNNER_IMAGE_INPUT}"
+          if [ -z "${image//[[:space:]]/}" ]; then
+            slug="${TEST_REPO:-$FALLBACK_REPO}"
+            image="${REGISTRY}/${slug}-playwright"
+          fi
+          image=$(printf '%s' "$image" | tr '[:upper:]' '[:lower:]')
+          # The Dockerfile bakes in the whole test repo, so the tag must change
+          # whenever ANY repo content changes — tag by the checked-out commit.
+          # Hashing only the Dockerfile and lockfile would serve stale test code
+          # and stale visual baselines whenever dependencies had not moved.
+          # Rebuilds stay cheap: the install layer only invalidates when the
+          # lockfile changes.
+          tag=$(git rev-parse --short=12 HEAD)
+          echo "ref=${image}:${tag}" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Runner image::${image}:${tag}"
+
+      - name: Log in to registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.registry-password || github.token }}
+
+      - name: Check whether the image already exists
+        id: check
+        shell: bash
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+        run: |
+          set -o pipefail
+          if docker manifest inspect "$IMAGE_REF" >/dev/null 2>&1; then
+            echo "::notice title=Image cache hit::Reusing the published runner image; skipping the build"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Image cache miss::Building and pushing the runner image"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Buildx
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+
+      - name: Build and push
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ${{ inputs.runner-context }}
+          file: ${{ inputs.runner-dockerfile }}
+          tags: ${{ steps.image.outputs.ref }}
+          push: true
+          cache-from: type=gha,scope=playwright-runner
+          cache-to: type=gha,scope=playwright-runner,mode=max
+
+  test:
+    name: ${{ matrix.entry.name }} ${{ matrix.entry.shard }}/${{ matrix.entry.shard_total }}
+    runs-on: ${{ inputs.runs-on }}
+    needs: [plan, build-runner]
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      RUNNER_IMAGE: ${{ needs.build-runner.outputs.image_ref }}
+      COMPOSE_PROJECT_NAME: ${{ inputs.compose-project-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.entry.name }}-${{ matrix.entry.shard }}
+    steps:
+      - name: Checkout caller repo (compose sources)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Log in to registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.registry-password || github.token }}
+
+      - name: Compute compose file list
+        shell: bash
+        env:
+          COMPOSE_FILES: ${{ inputs.compose-files }}
+        run: |
+          set -euo pipefail
+          # docker compose natively reads COMPOSE_FILE (colon-separated), so no
+          # unquoted "-f a -f b" argument string needs threading between steps.
+          compose_file=$(printf '%s\n' "$COMPOSE_FILES" | xargs -n1 | paste -sd: -)
+          if [ -z "$compose_file" ]; then
+            echo "::error title=No compose files::The compose-files input resolved to an empty list"
+            exit 1
+          fi
+          echo "COMPOSE_FILE=${compose_file}" >> "$GITHUB_ENV"
+          echo "::notice title=Compose::files=${compose_file} project=${COMPOSE_PROJECT_NAME}"
+
+      - name: Run pre-up script
+        if: inputs.compose-pre-up-script != ''
+        shell: bash
+        env:
+          PRE_UP_SCRIPT: ${{ inputs.compose-pre-up-script }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$PRE_UP_SCRIPT" ]; then
+            echo "::error title=Pre-up script missing::${PRE_UP_SCRIPT} does not exist in the caller checkout"
+            exit 1
+          fi
+          echo "::group::${PRE_UP_SCRIPT}"
+          chmod +x "$PRE_UP_SCRIPT"
+          "./${PRE_UP_SCRIPT#./}"
+          echo "::endgroup::"
+
+      - name: Docker compose up
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::docker compose up"
+          docker compose up -d --build --wait --wait-timeout 300
+          echo "::endgroup::"
+          echo "::group::docker compose ps"
+          docker compose ps --all
+          echo "::endgroup::"
+
+      - name: Wait for health URL
+        if: inputs.compose-health-url != ''
+        shell: bash
+        env:
+          HEALTH_URL: ${{ inputs.compose-health-url }}
+          HEALTH_TIMEOUT: ${{ inputs.compose-health-timeout-seconds }}
+        run: |
+          set -o pipefail
+          started=$SECONDS
+          until curl -fsS --max-time 3 "$HEALTH_URL" >/dev/null 2>&1; do
+            if [ $((SECONDS - started)) -ge "$HEALTH_TIMEOUT" ]; then
+              echo "::error title=Health check failed::No success response from ${HEALTH_URL} within ${HEALTH_TIMEOUT}s"
+              echo "::group::docker compose ps"
+              docker compose ps --all || true
+              echo "::endgroup::"
+              echo "::group::docker compose logs (tail 500)"
+              docker compose logs --no-color --tail=500 || true
+              echo "::endgroup::"
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::notice title=Health check::${HEALTH_URL} healthy after $((SECONDS - started))s"
+
+      - name: Seed data
+        if: inputs.seed-command != ''
+        shell: bash
+        env:
+          SEED_COMMAND: ${{ inputs.seed-command }}
+        run: |
+          set -euo pipefail
+          echo "::group::${SEED_COMMAND}"
+          bash -c "$SEED_COMMAND"
+          echo "::endgroup::"
+
+      # Written to RUNNER_TEMP (never the workspace) so it cannot be swept into
+      # an uploaded artifact, and mode 600 so other processes on the runner
+      # cannot read the credentials.
+      - name: Compose test environment file
+        id: envfile
+        shell: bash
+        env:
+          APP_ENV_INPUT: ${{ inputs.app-env }}
+          BASE_URL_INPUT: ${{ inputs.base-url }}
+          API_URL_INPUT: ${{ inputs.api-url }}
+          PLAIN_ENV_VARS: ${{ inputs.env-vars }}
+          SECRET_ENV_VARS: ${{ secrets.test-env-vars }}
+          PROJECT_OVERRIDES: ${{ inputs.project-env-overrides }}
+          PROJECT_NAME: ${{ matrix.entry.name }}
+        run: |
+          set -euo pipefail
+          env_file="${RUNNER_TEMP}/playwright-${PROJECT_NAME}-${RANDOM}.env"
+          install -m 600 /dev/null "$env_file"
+          {
+            echo "CI=true"
+            echo "APP_ENV=${APP_ENV_INPUT}"
+            echo "BASE_URL=${BASE_URL_INPUT}"
+            echo "API_URL=${API_URL_INPUT}"
+          } >> "$env_file"
+
+          write_vars() {
+            local mask="$1" payload="$2" count=0 line
+            [ -z "${payload//[[:space:]]/}" ] && return 0
+            while IFS= read -r line; do
+              [ -z "${line//[[:space:]]/}" ] && continue
+              case "$line" in
+                *=*) ;;
+                *) echo "::error title=Environment::Not a KEY=VALUE pair: ${line%%=*}"; exit 1 ;;
+              esac
+              if [ "$mask" = "true" ] && [ -n "${line#*=}" ]; then
+                echo "::add-mask::${line#*=}"
+              fi
+              printf '%s\n' "$line" >> "$env_file"
+              count=$((count + 1))
+            done <<< "$payload"
+            echo "::notice title=Environment::Exported ${count} $([ "$mask" = "true" ] && echo masked || echo plain) variable(s)"
+          }
+          write_vars false "$PLAIN_ENV_VARS"
+          write_vars true "$SECRET_ENV_VARS"
+
+          # Per-project overrides land last so they win. `<project>:KEY=VALUE`,
+          # split on the first colon so values containing colons survive.
+          applied=0
+          while IFS= read -r line; do
+            [ -z "${line//[[:space:]]/}" ] && continue
+            case "$line" in
+              *:*=*) ;;
+              *) echo "::error title=Environment::Not a <project>:KEY=VALUE entry: ${line}"; exit 1 ;;
+            esac
+            entry_project="${line%%:*}"
+            assignment="${line#*:}"
+            [ "${entry_project//[[:space:]]/}" = "$PROJECT_NAME" ] || continue
+            printf '%s\n' "$assignment" >> "$env_file"
+            applied=$((applied + 1))
+          done <<< "$PROJECT_OVERRIDES"
+          if [ "$applied" -gt 0 ]; then
+            echo "::notice title=Environment::Applied ${applied} override(s) for project '${PROJECT_NAME}'"
+          fi
+
+          echo "path=${env_file}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare report directories
+        shell: bash
+        run: mkdir -p pw-out/playwright-report pw-out/test-results pw-out/blob-report
+
+      - name: Run Playwright tests
+        shell: bash
+        env:
+          ENV_FILE: ${{ steps.envfile.outputs.path }}
+          RUNNER_WORKDIR: ${{ inputs.runner-workdir }}
+          PROJECT_NAME: ${{ matrix.entry.name }}
+          PROJECT_CONFIG: ${{ matrix.entry.config }}
+          SHARD: ${{ matrix.entry.shard }}
+          SHARD_TOTAL: ${{ matrix.entry.shard_total }}
+          TEST_TAGS: ${{ inputs.test-tags }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -o pipefail
+          echo "::notice title=Shard::${PROJECT_NAME} ${SHARD}/${SHARD_TOTAL} (${PROJECT_CONFIG})"
+
+          echo "::group::docker pull ${RUNNER_IMAGE}"
+          docker pull "$RUNNER_IMAGE"
+          echo "::endgroup::"
+
+          args=(
+            test
+            -c "$PROJECT_CONFIG"
+            --project="$PROJECT_NAME"
+            --shard="${SHARD}/${SHARD_TOTAL}"
+          )
+          if [ -n "$TEST_TAGS" ]; then
+            args+=(--grep="$TEST_TAGS")
+          fi
+
+          echo "::group::playwright test (${PROJECT_NAME} ${SHARD}/${SHARD_TOTAL})"
+          docker run --rm \
+            --network host \
+            --ipc host \
+            --env-file "$ENV_FILE" \
+            -v "${WORKSPACE}/pw-out/playwright-report:${RUNNER_WORKDIR}/playwright-report" \
+            -v "${WORKSPACE}/pw-out/test-results:${RUNNER_WORKDIR}/test-results" \
+            -v "${WORKSPACE}/pw-out/blob-report:${RUNNER_WORKDIR}/blob-report" \
+            "$RUNNER_IMAGE" \
+            "${args[@]}"
+          echo "::endgroup::"
+
+      - name: Remove the environment file
+        if: always()
+        shell: bash
+        env:
+          ENV_FILE: ${{ steps.envfile.outputs.path }}
+        run: rm -f "$ENV_FILE"
+
+      - name: Upload blob report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: blob-report-${{ matrix.entry.name }}-shard-${{ matrix.entry.shard }}
+          path: pw-out/blob-report/
+          retention-days: 1
+          compression-level: 9
+          if-no-files-found: ignore
+
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: traces-${{ matrix.entry.name }}-shard-${{ matrix.entry.shard }}
+          path: pw-out/test-results/**/*.zip
+          retention-days: ${{ inputs.trace-retention-days }}
+          compression-level: 9
+          if-no-files-found: ignore
+
+      - name: Dump compose logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "::group::docker compose ps"
+          docker compose ps --all || true
+          echo "::endgroup::"
+          echo "::group::docker compose logs (tail 500)"
+          docker compose logs --no-color --tail=500 || true
+          echo "::endgroup::"
+
+      - name: Docker compose down
+        if: always()
+        shell: bash
+        run: docker compose down -v --remove-orphans --rmi local || true
+
+  report:
+    name: Report + gate
+    needs: [test]
+    if: always()
+    # Relative refs to another reusable workflow resolve against the repository
+    # that defines *this* file, so this stays inside bjjeire-ci-templates even
+    # when called cross-repo.
+    uses: ./.github/workflows/playwright-report.yml
+    with:
+      test-result: ${{ needs.test.result }}
+      test-repo: ${{ inputs.test-repo }}
+      test-repo-ref: ${{ inputs.test-repo-ref }}
+      node-image: ${{ inputs.node-image }}
+      reporters: ${{ inputs.reporters }}
+      upload-junit: ${{ inputs.upload-junit }}
+      fail-on-flaky: ${{ inputs.fail-on-flaky }}
+      publish-report: ${{ inputs.publish-report }}
+      artifact-prefix: ${{ inputs.artifact-prefix }}
+
+  pr-comment:
+    name: PR comment
+    runs-on: ${{ inputs.runs-on }}
+    needs: [report]
+    if: ${{ always() && inputs.comment-on-pr && github.event_name == 'pull_request' }}
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      # Idempotent by construction: a hidden HTML marker identifies the comment,
+      # so re-runs edit one comment instead of spamming the thread. This is the
+      # same contract as actions/sticky-comment, inlined because a relative
+      # `uses: ./actions/...` inside a reusable workflow resolves against the
+      # caller repo rather than this one.
+      - name: Upsert result comment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          STATUS: ${{ needs.report.outputs.status }}
+          FAILED: ${{ needs.report.outputs.failed-count }}
+          FLAKY: ${{ needs.report.outputs.flaky-count }}
+          REPORT_NAME: ${{ needs.report.outputs.report-artifact-name }}
+          REPORT_URL: ${{ needs.report.outputs.report-url }}
+          MARKER: ${{ inputs.artifact-prefix }}
+        with:
+          script: |
+            const marker = `<!-- ${process.env.MARKER}-report -->`;
+            const status = process.env.STATUS || 'unknown';
+            const failed = process.env.FAILED || '0';
+            const flaky = process.env.FLAKY || '0';
+            const reportName = process.env.REPORT_NAME || '';
+            const reportUrl = process.env.REPORT_URL || '';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const label = status === 'success' ? 'PASS' : 'FAIL';
+            const reportLine = reportUrl
+              ? `HTML report: ${reportUrl}`
+              : `HTML report artifact: \`${reportName}\` (download it from the run page)`;
+
+            const body = [
+              marker,
+              `## Playwright tests: ${label}`,
+              '',
+              '| Result | Failed | Flaky |',
+              '|--------|-------:|------:|',
+              `| \`${status}\` | ${failed} | ${flaky} |`,
+              '',
+              reportLine,
+              `Workflow run: ${runUrl}`,
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              core.notice(`Updated PR comment ${existing.id} on #${issue_number}`);
+            } else {
+              const { data: created } = await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              core.notice(`Created PR comment ${created.id} on #${issue_number}`);
+            }

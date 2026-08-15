@@ -11,6 +11,9 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`dotnet-build-test.yml`](.github/workflows/dotnet-build-test.yml) | Build a .NET solution once, optional `dotnet format` gate, matrix test run against shared build output |
 | [`maven-build-test.yml`](.github/workflows/maven-build-test.yml) | `mvn verify` (surefire + failsafe) on the host runner for Testcontainers, optional JUnit report check |
 | [`node-build-test.yml`](.github/workflows/node-build-test.yml) | Container-first Node job: node_modules cache, install, ordered commands, artifact in/out + failure diagnostics |
+| [`playwright-tests.yml`](.github/workflows/playwright-tests.yml) | Sharded Playwright run against an environment that already exists — plans the matrix, runs shards, merges and gates |
+| [`playwright-docker-tests.yml`](.github/workflows/playwright-docker-tests.yml) | Sharded Playwright run that provisions its own Docker Compose stack per shard, plus a sticky PR result comment |
+| [`playwright-report.yml`](.github/workflows/playwright-report.yml) | Shared tail for any sharded Playwright run: merge blob reports, summarise counts, publish to Pages, gate on failures/flakes |
 | [`docker-build-push.yml`](.github/workflows/docker-build-push.yml) | Multi-arch buildx build with GHA cache, SBOM + provenance attestation, cosign keyless signing, Trivy scan → code scanning |
 | [`security-scan.yml`](.github/workflows/security-scan.yml) | Dependency review + gitleaks secret scan + Semgrep SAST, each independently toggleable |
 | [`terraform-plan.yml`](.github/workflows/terraform-plan.yml) | fmt + validate + plan (Azure OIDC), plan artifact + step summary, `has-changes` output |
@@ -23,6 +26,10 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 |---|---|
 | [`actions/setup-dotnet-cached`](actions/setup-dotnet-cached/action.yml) | NuGet package cache (container-first jobs — no SDK install) |
 | [`actions/setup-node-cached`](actions/setup-node-cached/action.yml) | node_modules cache + optional `npm ci` |
+| [`actions/setup-java-cached`](actions/setup-java-cached/action.yml) | JDK install + Maven/Gradle dependency cache; `install-jdk: false` restores only the cache in container-first jobs |
+| [`actions/azure-aks-login`](actions/azure-aks-login/action.yml) | Azure OIDC login → kubelogin/kubectl/helm → AKS kubeconfig, with a reachability check |
+| [`actions/wait-for-http`](actions/wait-for-http/action.yml) | Poll a URL until it answers an accepted status class; falls back to python3 on images without curl |
+| [`actions/playwright-plan-matrix`](actions/playwright-plan-matrix/action.yml) | Expand Playwright projects × shards into a flat matrix, with per-project shard and config overrides |
 | [`actions/dotnet-run-tests`](actions/dotnet-run-tests/action.yml) | Single test project with TRX output + artifact upload |
 | [`actions/detect-changes`](actions/detect-changes/action.yml) | Evaluate caller-supplied path filters; emits a `changes` JSON array + summary. Filters stay in the caller |
 | [`actions/check-required-jobs`](actions/check-required-jobs/action.yml) | Aggregate branch-protection gate over `toJson(needs)` — fails on failure/cancelled, passes on path-filter skips |
@@ -32,6 +39,8 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`actions/oci-push-artifact`](actions/oci-push-artifact/action.yml) | Publish a file to any OCI registry as a typed artifact with ORAS; extra tags alias one digest |
 
 Full input/output documentation lives in each workflow's `workflow_call` block — every input has a description, type, and default. Ready-to-copy caller workflows are in [`examples/`](examples/).
+
+> **Migrating from the Playwright workflows in `bjjeire-tests`?** The inputs were renamed to `kebab-case`, the fourteen named secrets collapsed into one `test-env-vars` payload, and `runner_label` became `runs-on` with a different default. See [`docs/migrating-playwright-workflows.md`](docs/migrating-playwright-workflows.md).
 
 ## Usage
 

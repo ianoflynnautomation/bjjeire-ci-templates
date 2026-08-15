@@ -1,0 +1,71 @@
+# Example caller: run a sharded Playwright suite against a Docker Compose stack
+# that this workflow brings up itself, one stack per shard, on the runner.
+# Copy into your repo as .github/workflows/smoke.yml and adjust.
+#
+# Use this when there is no deployed environment to point at. When one already
+# exists, playwright-tests.yml is cheaper and faster.
+name: Smoke Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Playwright (Docker)
+    permissions:
+      contents: read
+      actions: read
+      packages: write        # pushes the cached test-runner image
+      id-token: write
+      pull-requests: write   # for the sticky result comment
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/playwright-docker-tests.yml@v1
+    with:
+      test-repo: my-org/my-e2e-tests
+      test-repo-ref: main
+
+      # Compose files are read from THIS repo's checkout, stacked left to right.
+      compose-files: |
+        docker-compose.yml
+        docker-compose.override.ci.yml
+      compose-pre-up-script: .github/scripts/smoke-pre-up.sh
+      compose-health-url: http://localhost:5003/health
+      seed-command: docker compose run --rm seeder
+
+      base-url: http://localhost:3000
+      api-url: http://localhost:5003
+      test-tags: "@smoke"
+
+      playwright-projects: |
+        api
+        chromium-desktop
+        firefox-desktop
+      shard-total: 4
+      project-shard-overrides: |
+        api=2
+      config-map: |
+        api=playwright.api.config.ts
+      default-config: playwright.ui.config.ts
+
+      env-vars: |
+        ACCEPT_INVALID_CERTS=true
+
+      # Must match the WORKDIR in the test repo's Dockerfile — the report
+      # directories are bind-mounted underneath it.
+      runner-workdir: /home/pwuser/app
+
+      publish-report: false
+      comment-on-pr: true
+    secrets:
+      test-env-vars: |
+        PW_TEST_USER=${{ secrets.PW_TEST_USER }}
+        PW_TEST_PASSWORD=${{ secrets.PW_TEST_PASSWORD }}

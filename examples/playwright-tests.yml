@@ -1,0 +1,107 @@
+# Example caller: run a sharded Playwright suite against an environment that
+# already exists (a deployed staging env, a preview env, a long-lived cluster).
+# Copy into your repo as .github/workflows/acceptance.yml and adjust.
+#
+# The environment is NOT provisioned here — see playwright-docker-tests.yml for
+# the self-provisioning variant.
+name: Acceptance Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Frontend URL to test against"
+        required: true
+        type: string
+      api_url:
+        description: "API URL to test against"
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    name: Playwright
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+      # Both are required only because publish-report is true below.
+      pages: write
+      id-token: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/playwright-tests.yml@v1
+    with:
+      # The test code lives in a separate repo here; omit test-repo when the
+      # tests live alongside the caller.
+      test-repo: my-org/my-e2e-tests
+      test-repo-ref: main
+
+      app-env: staging
+      base-url: ${{ inputs.base_url }}
+      api-url: ${{ inputs.api_url }}
+      test-tags: "@smoke|@acceptance"
+
+      playwright-projects: |
+        api
+        chromium-desktop
+        firefox-desktop
+        webkit-desktop
+        a11y
+      # Spend shards where the suite is actually slow.
+      shard-total: 6
+      project-shard-overrides: |
+        api=3
+        a11y=1
+      # This repo splits API and UI tests across two Playwright configs.
+      config-map: |
+        api=playwright.api.config.ts
+      default-config: playwright.ui.config.ts
+
+      # Non-sensitive knobs every shard sees.
+      env-vars: |
+        ACCEPT_INVALID_CERTS=false
+
+      # Per-project overrides land last and win. Here the API shards talk
+      # straight to the in-cluster Service DNS, which skips the edge proxy, so
+      # the edge service-token headers must be cleared for those shards only.
+      project-env-overrides: |
+        api:API_URL=http://my-api.my-namespace.svc.cluster.local
+        api:CF_ACCESS_CLIENT_ID=
+        api:CF_ACCESS_CLIENT_SECRET=
+
+      playwright-image: mcr.microsoft.com/playwright:v1.61.0-noble
+      fail-on-flaky: true
+      publish-report: true
+    secrets:
+      # One secret carries every credential as KEY=VALUE lines; each value is
+      # masked before use. Beats naming a dozen project-specific secrets in a
+      # shared template.
+      test-env-vars: |
+        AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}
+        AZURE_TESTS_CLIENT_ID=${{ secrets.AZURE_TESTS_CLIENT_ID }}
+        AZURE_TESTS_CLIENT_SECRET=${{ secrets.AZURE_TESTS_CLIENT_SECRET }}
+        CF_ACCESS_CLIENT_ID=${{ secrets.CF_ACCESS_CLIENT_ID }}
+        CF_ACCESS_CLIENT_SECRET=${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        PW_TEST_USER=${{ secrets.PW_TEST_USER }}
+        PW_TEST_PASSWORD=${{ secrets.PW_TEST_PASSWORD }}
+
+  gate:
+    name: Acceptance Complete
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [acceptance]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: ianoflynnautomation/bjjeire-ci-templates/actions/check-required-jobs@v1
+        with:
+          needs-json: ${{ toJson(needs) }}
+          summary-title: Acceptance

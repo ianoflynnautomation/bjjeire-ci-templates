@@ -1,0 +1,464 @@
+name: Playwright Tests (Reusable)
+
+# Sharded Playwright runner for an environment that already exists. This
+# workflow is deliberately provisioning-agnostic: the caller stands the
+# environment up (or points at a long-lived one), passes URLs in, and this
+# workflow owns matrix execution, report merging, and the result gate.
+#
+# For a stack that has to be provisioned on the same runner as the tests, use
+# playwright-docker-tests.yml instead.
+#
+# Required caller permissions (superset of every job below — GitHub rejects the
+# run at parse time if the caller grants less):
+#   contents: read
+#   actions: read
+#   packages: read    # only when the container image is private
+#   pages: write      # only when publish-report: true
+#   id-token: write   # only when publish-report: true
+#
+# No top-level concurrency here — reusable workflows inherit github.workflow
+# from the caller; declaring the same group in both self-deadlocks. Put
+# concurrency on the caller only.
+#
+# Environment plumbing is generic on purpose. Rather than naming your secrets
+# here (which would bake one project's auth model into a shared template), pass
+# them as newline-separated KEY=VALUE pairs through the `test-env-vars` secret;
+# every value is registered with ::add-mask:: before use. Per-project
+# differences — an in-cluster URL for the API shards, service-token headers the
+# browser shards must not send — go through `project-env-overrides`.
+#
+# The matrix planner is inlined rather than delegated to
+# actions/playwright-plan-matrix: a relative `uses: ./actions/...` inside a
+# reusable workflow resolves against the *caller* repo, not this one. Consumers
+# building their own runner job should use the composite directly.
+
+on:
+  workflow_call:
+    inputs:
+      playwright-projects:
+        description: >-
+          Newline- or comma-separated Playwright project names to run. Must
+          match the project names declared in your Playwright config(s).
+        required: true
+        type: string
+      base-url:
+        description: "Exported as BASE_URL. Browser shards need a publicly resolvable origin when the app uses a redirect-based OAuth flow."
+        required: false
+        type: string
+        default: ""
+      api-url:
+        description: "Exported as API_URL."
+        required: false
+        type: string
+        default: ""
+      app-env:
+        description: "Exported as APP_ENV — the profile your Playwright config switches on (e.g. local | staging | docker)."
+        required: false
+        type: string
+        default: "local"
+      test-tags:
+        description: 'Playwright grep filter, e.g. "@smoke" or "@smoke|@acceptance". Empty runs everything the projects select.'
+        required: false
+        type: string
+        default: ""
+      shard-total:
+        description: "Default number of parallel shards per project."
+        required: false
+        type: number
+        default: 6
+      project-shard-overrides:
+        description: >-
+          Newline-separated `project=count` overrides, so a suite with four
+          tests does not get six shards. Projects not listed use shard-total.
+        required: false
+        type: string
+        default: ""
+      config-map:
+        description: >-
+          Newline-separated `project=config-file` pairs, for repos that split
+          API and UI tests across separate Playwright configs. Projects not
+          listed use default-config.
+        required: false
+        type: string
+        default: ""
+      default-config:
+        description: "Playwright config used by any project absent from config-map."
+        required: false
+        type: string
+        default: "playwright.config.ts"
+      env-vars:
+        description: >-
+          Newline-separated KEY=VALUE pairs exported to every shard. For
+          non-sensitive configuration only — use the test-env-vars secret for
+          anything that must be masked.
+        required: false
+        type: string
+        default: ""
+      project-env-overrides:
+        description: >-
+          Newline-separated `project:KEY=VALUE` entries applied only to shards
+          of that project, after env-vars and test-env-vars. Use an empty value
+          to unset a variable for that project. Example — send the API shards
+          straight at the in-cluster Service DNS and drop the edge headers they
+          no longer need:
+            api:API_URL=http://my-api.my-ns.svc.cluster.local
+            api:CF_ACCESS_CLIENT_ID=
+            api:CF_ACCESS_CLIENT_SECRET=
+        required: false
+        type: string
+        default: ""
+      only-changed-ref:
+        description: >-
+          When set (e.g. "origin/main"), run only the tests affected by changes
+          since this git ref (`playwright test --only-changed`). Meaningful for
+          test-repo PRs only — app-repo changes do not map to test-file diffs.
+          Empty runs everything selected by test-tags.
+        required: false
+        type: string
+        default: ""
+      playwright-image:
+        description: >-
+          Container image for the test job. Must ship the browsers matching the
+          @playwright/test version in the lockfile — pin the tag to the package
+          version, or a digest.
+        required: false
+        type: string
+        default: "mcr.microsoft.com/playwright:v1.61.0-noble"
+      install-command:
+        description: "Dependency install command run inside the test container."
+        required: false
+        type: string
+        default: "npm ci --ignore-scripts"
+      working-directory:
+        description: "Directory containing package.json / the Playwright config, relative to the checkout."
+        required: false
+        type: string
+        default: "."
+      test-repo:
+        description: "Owner/repo holding the test code. Empty = the caller repo."
+        required: false
+        type: string
+        default: ""
+      test-repo-ref:
+        description: "Git ref of the test repo to check out (tag, branch, or SHA)."
+        required: false
+        type: string
+        default: ""
+      runs-on:
+        description: "Runner label(s) for the shard jobs. Override to land on a self-hosted or in-cluster pool."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      report-runs-on:
+        description: >-
+          Runner label(s) for the merge/publish/gate jobs. Kept separate from
+          runs-on: the shards may belong on a self-hosted pool while reporting
+          stays on a GitHub-hosted runner, which is also where the Pages
+          deployment flow expects to run.
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout in minutes for each shard job."
+        required: false
+        type: number
+        default: 30
+      node-image:
+        description: "Container image providing the Node toolchain for the merge job."
+        required: false
+        type: string
+        default: "node:22-bookworm-slim"
+      reporters:
+        description: "Reporters passed to `playwright merge-reports`."
+        required: false
+        type: string
+        default: "html,json"
+      upload-junit:
+        description: "Upload the merged JUnit XML. Requires `junit` in reporters."
+        required: false
+        type: boolean
+        default: false
+      fail-on-flaky:
+        description: "Fail the gate when any test passed only after a retry."
+        required: false
+        type: boolean
+        default: false
+      publish-report:
+        description: "Publish the merged HTML report to GitHub Pages. Requires pages: write + id-token: write at the caller."
+        required: false
+        type: boolean
+        default: false
+      artifact-prefix:
+        description: "Prefix for the report artifacts, so two calls in one run do not collide."
+        required: false
+        type: string
+        default: "playwright"
+      trace-retention-days:
+        description: "Retention in days for the failure trace artifacts."
+        required: false
+        type: number
+        default: 7
+    secrets:
+      test-env-vars:
+        description: >-
+          Newline-separated KEY=VALUE pairs exported to every shard, each value
+          registered with ::add-mask::. This is where auth credentials, database
+          URLs, and telemetry headers belong.
+        required: false
+    outputs:
+      status:
+        description: "success | failure — the gated result of the matrix test job."
+        value: ${{ jobs.report.outputs.status }}
+      passed-count:
+        description: "Number of tests that passed."
+        value: ${{ jobs.report.outputs.passed-count }}
+      failed-count:
+        description: "Number of failed tests across all shards (0 on green)."
+        value: ${{ jobs.report.outputs.failed-count }}
+      flaky-count:
+        description: "Number of flaky tests — passed only after a retry."
+        value: ${{ jobs.report.outputs.flaky-count }}
+      report-artifact-name:
+        description: "Name of the merged HTML report artifact."
+        value: ${{ jobs.report.outputs.report-artifact-name }}
+      report-url:
+        description: "Public URL of the published HTML report. Empty unless publish-report ran."
+        value: ${{ jobs.report.outputs.report-url }}
+
+jobs:
+  plan:
+    name: Plan matrix
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      job-count: ${{ steps.plan.outputs.job-count }}
+    steps:
+      - name: Plan matrix
+        id: plan
+        shell: bash
+        env:
+          PROJECTS: ${{ inputs.playwright-projects }}
+          SHARD_TOTAL: ${{ inputs.shard-total }}
+          OVERRIDES: ${{ inputs.project-shard-overrides }}
+          CONFIG_MAP: ${{ inputs.config-map }}
+          DEFAULT_CONFIG: ${{ inputs.default-config }}
+        run: |
+          set -euo pipefail
+          projects_json=$(printf '%s\n' "${PROJECTS//,/$'\n'}" | jq -R -n -c \
+            '[inputs | gsub("^\\s+|\\s+$"; "") | select(length > 0)]')
+          if [ "$(jq 'length' <<< "$projects_json")" -eq 0 ]; then
+            echo "::error title=No projects::The playwright-projects input resolved to an empty list"
+            exit 1
+          fi
+          overrides_json=$(printf '%s\n' "$OVERRIDES" | jq -R -n -c \
+            '[inputs | gsub("\\s"; "") | select(length > 0)
+              | capture("^(?<k>[^=]+)=(?<v>[0-9]+)$") | {(.k): (.v | tonumber)}] | add // {}')
+          config_json=$(printf '%s\n' "$CONFIG_MAP" | jq -R -n -c \
+            '[inputs | gsub("^\\s+|\\s+$"; "") | select(length > 0)
+              | capture("^(?<k>[^=]+)=(?<v>.+)$")
+              | {(.k | gsub("\\s"; "")): (.v | gsub("^\\s+|\\s+$"; ""))}] | add // {}')
+          plan=$(jq -nc \
+            --argjson projects "$projects_json" \
+            --argjson overrides "$overrides_json" \
+            --argjson configs "$config_json" \
+            --argjson defaultShards "$SHARD_TOTAL" \
+            --arg defaultConfig "$DEFAULT_CONFIG" '
+            [ $projects[] | . as $p
+              | { name: $p,
+                  config: (($configs[$p]) // $defaultConfig),
+                  shard_total: (($overrides[$p]) // $defaultShards) } ]')
+          matrix=$(jq -c '[ .[] | . as $e | [range(1; $e.shard_total + 1)]
+                            | .[] | { name: $e.name, config: $e.config, shard: ., shard_total: $e.shard_total } ]' <<< "$plan")
+          job_count=$(jq 'length' <<< "$matrix")
+          {
+            echo "matrix=${matrix}"
+            echo "job-count=${job_count}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::group::Planned matrix"
+          jq -r '.[] | "  \(.name)  shards=\(.shard_total)  config=\(.config)"' <<< "$plan"
+          echo "::endgroup::"
+          echo "::notice title=Matrix planned::$(jq 'length' <<< "$plan") project(s) → ${job_count} shard job(s)"
+
+  test:
+    name: ${{ matrix.entry.name }} ${{ matrix.entry.shard }}/${{ matrix.entry.shard_total }}
+    runs-on: ${{ inputs.runs-on }}
+    needs: [plan]
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ inputs.playwright-image }}
+      # Chromium's default /dev/shm is too small in a container; sharing the
+      # host IPC namespace avoids renderer crashes under parallelism.
+      options: --ipc=host
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout test repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ${{ inputs.test-repo }}
+          ref: ${{ inputs.test-repo-ref }}
+          persist-credentials: false
+          # --only-changed needs history to diff against the base ref.
+          fetch-depth: ${{ inputs.only-changed-ref == '' && 1 || 0 }}
+
+      - name: Cache npm downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install dependencies
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+          # The image already ships the browsers; re-downloading them per shard
+          # is the single most expensive avoidable step in this job.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          set -euo pipefail
+          echo "::group::${INSTALL_COMMAND}"
+          bash -c "$INSTALL_COMMAND"
+          echo "::endgroup::"
+
+      # Everything flows through $GITHUB_ENV, including BASE_URL/API_URL, so
+      # that project-env-overrides can genuinely override them. A job-level
+      # `env:` entry would win over $GITHUB_ENV and silently defeat the
+      # override.
+      - name: Export test environment
+        shell: bash
+        env:
+          APP_ENV_INPUT: ${{ inputs.app-env }}
+          BASE_URL_INPUT: ${{ inputs.base-url }}
+          API_URL_INPUT: ${{ inputs.api-url }}
+          PLAIN_ENV_VARS: ${{ inputs.env-vars }}
+          SECRET_ENV_VARS: ${{ secrets.test-env-vars }}
+          PROJECT_OVERRIDES: ${{ inputs.project-env-overrides }}
+          PROJECT_NAME: ${{ matrix.entry.name }}
+        run: |
+          set -euo pipefail
+          {
+            echo "CI=true"
+            echo "APP_ENV=${APP_ENV_INPUT}"
+            echo "BASE_URL=${BASE_URL_INPUT}"
+            echo "API_URL=${API_URL_INPUT}"
+          } >> "$GITHUB_ENV"
+
+          write_vars() {
+            local mask="$1" payload="$2" count=0 line
+            [ -z "${payload//[[:space:]]/}" ] && return 0
+            while IFS= read -r line; do
+              [ -z "${line//[[:space:]]/}" ] && continue
+              case "$line" in
+                *=*) ;;
+                *) echo "::error title=Environment::Not a KEY=VALUE pair: ${line%%=*}"; exit 1 ;;
+              esac
+              if [ "$mask" = "true" ] && [ -n "${line#*=}" ]; then
+                echo "::add-mask::${line#*=}"
+              fi
+              printf '%s\n' "$line" >> "$GITHUB_ENV"
+              count=$((count + 1))
+            done <<< "$payload"
+            echo "::notice title=Environment::Exported ${count} $([ "$mask" = "true" ] && echo masked || echo plain) variable(s)"
+          }
+          write_vars false "$PLAIN_ENV_VARS"
+          write_vars true "$SECRET_ENV_VARS"
+
+          # Per-project overrides land last so they win. Each line is
+          # `<project>:KEY=VALUE`; split on the first colon only, so values
+          # containing colons (URLs) survive intact.
+          applied=0
+          while IFS= read -r line; do
+            [ -z "${line//[[:space:]]/}" ] && continue
+            case "$line" in
+              *:*=*) ;;
+              *) echo "::error title=Environment::Not a <project>:KEY=VALUE entry: ${line}"; exit 1 ;;
+            esac
+            entry_project="${line%%:*}"
+            assignment="${line#*:}"
+            [ "${entry_project//[[:space:]]/}" = "$PROJECT_NAME" ] || continue
+            printf '%s\n' "$assignment" >> "$GITHUB_ENV"
+            applied=$((applied + 1))
+          done <<< "$PROJECT_OVERRIDES"
+          if [ "$applied" -gt 0 ]; then
+            echo "::notice title=Environment::Applied ${applied} override(s) for project '${PROJECT_NAME}'"
+          fi
+
+      - name: Run Playwright tests
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          PROJECT_NAME: ${{ matrix.entry.name }}
+          PROJECT_CONFIG: ${{ matrix.entry.config }}
+          SHARD: ${{ matrix.entry.shard }}
+          SHARD_TOTAL: ${{ matrix.entry.shard_total }}
+          TEST_TAGS: ${{ inputs.test-tags }}
+          ONLY_CHANGED_REF: ${{ inputs.only-changed-ref }}
+        run: |
+          set -o pipefail
+          echo "::notice title=Shard::${PROJECT_NAME} ${SHARD}/${SHARD_TOTAL} (${PROJECT_CONFIG})"
+          args=(
+            -c "${PROJECT_CONFIG}"
+            --project="${PROJECT_NAME}"
+            --shard="${SHARD}/${SHARD_TOTAL}"
+          )
+          if [ -n "${TEST_TAGS}" ]; then
+            args+=(--grep="${TEST_TAGS}")
+          fi
+          if [ -n "${ONLY_CHANGED_REF}" ]; then
+            args+=(--only-changed="${ONLY_CHANGED_REF}")
+          fi
+          echo "::group::playwright test"
+          npx playwright test "${args[@]}"
+          echo "::endgroup::"
+
+      - name: Upload blob report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: blob-report-${{ matrix.entry.name }}-shard-${{ matrix.entry.shard }}
+          path: ${{ inputs.working-directory }}/blob-report/
+          retention-days: 1
+          compression-level: 9
+          if-no-files-found: ignore
+
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: traces-${{ matrix.entry.name }}-shard-${{ matrix.entry.shard }}
+          path: ${{ inputs.working-directory }}/test-results/**/*.zip
+          retention-days: ${{ inputs.trace-retention-days }}
+          compression-level: 9
+          if-no-files-found: ignore
+
+  report:
+    name: Report + gate
+    needs: [test]
+    if: always()
+    # Relative refs to another reusable workflow resolve against the repository
+    # that defines *this* file, so this stays inside bjjeire-ci-templates even
+    # when called cross-repo.
+    uses: ./.github/workflows/playwright-report.yml
+    with:
+      test-result: ${{ needs.test.result }}
+      test-repo: ${{ inputs.test-repo }}
+      test-repo-ref: ${{ inputs.test-repo-ref }}
+      working-directory: ${{ inputs.working-directory }}
+      node-image: ${{ inputs.node-image }}
+      install-command: ${{ inputs.install-command }}
+      reporters: ${{ inputs.reporters }}
+      upload-junit: ${{ inputs.upload-junit }}
+      fail-on-flaky: ${{ inputs.fail-on-flaky }}
+      publish-report: ${{ inputs.publish-report }}
+      artifact-prefix: ${{ inputs.artifact-prefix }}
+      runs-on: ${{ inputs.report-runs-on }}

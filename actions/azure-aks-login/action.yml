@@ -1,0 +1,137 @@
+name: 'Azure AKS Login'
+description: 'Authenticates to Azure with workload-identity OIDC, installs kubectl/kubelogin (and optionally helm), and writes a converted kubeconfig for an AKS cluster. Cloud-agnostic in shape but Azure-specific in implementation — the caller supplies every identity and cluster value.'
+
+inputs:
+  client-id:
+    description: 'Entra application (client) ID of the federated identity. Requires the job to grant id-token: write.'
+    required: true
+  tenant-id:
+    description: 'Entra tenant ID.'
+    required: true
+  subscription-id:
+    description: 'Azure subscription containing the cluster.'
+    required: true
+  resource-group:
+    description: 'Resource group containing the AKS cluster.'
+    required: true
+  cluster-name:
+    description: 'AKS cluster name.'
+    required: true
+  admin:
+    description: 'Fetch cluster-admin credentials (`az aks get-credentials --admin`). Requires the identity to hold the Cluster Admin role; prefer "false" with Azure RBAC.'
+    required: false
+    default: 'false'
+  kubelogin-method:
+    description: 'kubelogin login mode: azurecli | workloadidentity | spn | msi | azd.'
+    required: false
+    default: 'azurecli'
+  install-helm:
+    description: 'Also install helm. Set "false" for kubectl-only jobs (e.g. teardown).'
+    required: false
+    default: 'true'
+  kubelogin-version:
+    description: 'kubelogin release to install.'
+    required: false
+    default: 'v0.1.4'
+  kubectl-version:
+    description: 'kubectl version to install. Empty installs the latest stable release.'
+    required: false
+    default: ''
+  helm-version:
+    description: 'helm version to install. Empty installs the latest stable release.'
+    required: false
+    default: ''
+  summary-title:
+    description: 'Heading used in the step summary. Set to an empty string to skip the summary.'
+    required: false
+    default: 'AKS login'
+
+outputs:
+  cluster-name:
+    description: 'Cluster the kubeconfig points at.'
+    value: ${{ inputs.cluster-name }}
+  server:
+    description: 'API server URL from the resulting kubeconfig context.'
+    value: ${{ steps.verify.outputs.server }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Azure OIDC login
+      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5  # v2.3.0
+      with:
+        client-id: ${{ inputs.client-id }}
+        tenant-id: ${{ inputs.tenant-id }}
+        subscription-id: ${{ inputs.subscription-id }}
+
+    - name: Setup kubelogin
+      uses: azure/use-kubelogin@0ce7c36141aa27d4934872cf00b0120804c98a29  # v1.3
+      with:
+        kubelogin-version: ${{ inputs.kubelogin-version }}
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede  # v4.0.1
+      with:
+        version: ${{ inputs.kubectl-version }}
+
+    - name: Setup helm
+      if: inputs.install-helm == 'true'
+      uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+      with:
+        version: ${{ inputs.helm-version }}
+
+    - name: Get AKS credentials
+      shell: bash
+      env:
+        CLUSTER_RG: ${{ inputs.resource-group }}
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+        ADMIN: ${{ inputs.admin }}
+        LOGIN_METHOD: ${{ inputs.kubelogin-method }}
+      run: |
+        set -euo pipefail
+        echo "::group::az aks get-credentials"
+        args=(--resource-group "${CLUSTER_RG}" --name "${CLUSTER_NAME}" --overwrite-existing)
+        if [ "${ADMIN}" = "true" ]; then
+          args+=(--admin)
+        fi
+        az aks get-credentials "${args[@]}"
+        kubelogin convert-kubeconfig -l "${LOGIN_METHOD}"
+        echo "::endgroup::"
+
+    - name: Verify cluster reachability
+      id: verify
+      shell: bash
+      env:
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+      run: |
+        set -euo pipefail
+        server=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)
+        echo "server=${server}" >> "$GITHUB_OUTPUT"
+        if ! kubectl version -o json >/dev/null 2>&1; then
+          echo "::error title=Cluster unreachable::kubectl could not reach ${CLUSTER_NAME} at ${server:-<unknown>} — check the identity's role assignment and whether the API server is private"
+          exit 1
+        fi
+        echo "::notice title=AKS login::${CLUSTER_NAME} reachable at ${server}"
+
+    - name: Write summary
+      if: inputs.summary-title != ''
+      shell: bash
+      env:
+        TITLE: ${{ inputs.summary-title }}
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+        CLUSTER_RG: ${{ inputs.resource-group }}
+        SERVER: ${{ steps.verify.outputs.server }}
+        ADMIN: ${{ inputs.admin }}
+        HELM: ${{ inputs.install-helm }}
+      run: |
+        {
+          echo "### ${TITLE}"
+          echo ""
+          echo "| Field | Value |"
+          echo "| --- | --- |"
+          echo "| Cluster | \`${CLUSTER_NAME}\` |"
+          echo "| Resource group | \`${CLUSTER_RG}\` |"
+          echo "| API server | \`${SERVER}\` |"
+          echo "| Admin credentials | ${ADMIN} |"
+          echo "| helm installed | ${HELM} |"
+        } >> "$GITHUB_STEP_SUMMARY"

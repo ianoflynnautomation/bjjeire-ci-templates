@@ -1,0 +1,148 @@
+# Example caller: stand up (or tear down) an ephemeral namespace on AKS using
+# the azure-aks-login and wait-for-http composites.
+#
+# Cluster access and readiness polling are the reusable parts; what you deploy
+# into the namespace is repo-specific glue and stays here in the caller.
+#
+# Requires a federated credential (workload identity) for this repo, and the
+# job to grant id-token: write.
+name: Ephemeral Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Lifecycle action"
+        type: choice
+        options: [deploy, destroy]
+        default: deploy
+        required: true
+      env_id:
+        description: "Environment id — also the namespace. DNS-safe, <=63 chars."
+        type: string
+        required: true
+      image_tag:
+        description: "Image tag to deploy (ignored for destroy)"
+        type: string
+        required: false
+        default: ""
+
+concurrency:
+  group: env-${{ inputs.env_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.env_id }}
+    if: inputs.action == 'deploy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      base_url: ${{ steps.urls.outputs.base_url }}
+    env:
+      NAMESPACE: ${{ inputs.env_id }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      ROOT_DOMAIN: ${{ vars.ROOT_DOMAIN }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Validate env_id
+        shell: bash
+        env:
+          ENV_ID: ${{ inputs.env_id }}
+        run: |
+          set -euo pipefail
+          # Kubernetes namespace / DNS-1123 label.
+          if ! echo "$ENV_ID" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'; then
+            echo "::error title=Invalid env_id::'${ENV_ID}' is not a valid DNS-1123 label"
+            exit 1
+          fi
+
+      - name: Log in to AKS
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/azure-aks-login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          install-helm: 'true'
+
+      # ── repo-specific glue from here down ──────────────────────────────────
+      - name: Helm upgrade --install
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm upgrade --install my-app oci://ghcr.io/my-org/my-app \
+            --namespace "$NAMESPACE" --create-namespace \
+            --set-string image.tag="$IMAGE_TAG" \
+            --wait --timeout 10m
+
+      - name: Compute URLs
+        id: urls
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "base_url=https://${NAMESPACE}.${ROOT_DOMAIN}" >> "$GITHUB_OUTPUT"
+
+      # A freshly created hostname needs DNS propagation and a certificate, so
+      # poll rather than assuming it is live. insecure=true tolerates the window
+      # before cert-manager has issued; fail-on-timeout=false keeps this a
+      # warm-up rather than a gate.
+      - name: Wait for the frontend to answer
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/wait-for-http@v1
+        with:
+          url: ${{ steps.urls.outputs.base_url }}
+          expect-status: '2xx,3xx'
+          timeout-seconds: '180'
+          insecure: 'true'
+          fail-on-timeout: 'false'
+          summary-title: Frontend readiness
+
+  destroy:
+    name: Destroy ${{ inputs.env_id }}
+    if: inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NAMESPACE: ${{ inputs.env_id }}
+    steps:
+      - name: Log in to AKS
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/azure-aks-login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          install-helm: 'true'
+
+      - name: Delete the namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Refuse to touch anything not explicitly marked ephemeral, so a
+          # mistyped env_id cannot delete a long-lived namespace.
+          if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+            echo "::notice title=Nothing to destroy::namespace ${NAMESPACE} is not present"
+            exit 0
+          fi
+          label=$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.example\.io/ephemeral}' 2>/dev/null || true)
+          if [ "$label" != "true" ]; then
+            echo "::error title=Refusing to destroy::${NAMESPACE} lacks example.io/ephemeral=true"
+            exit 1
+          fi
+          helm uninstall my-app --namespace "$NAMESPACE" --ignore-not-found || true
+          kubectl delete namespace "$NAMESPACE" --wait=false
+          echo "::notice title=Env destroyed::${NAMESPACE} marked for deletion"

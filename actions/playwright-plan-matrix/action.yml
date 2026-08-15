@@ -1,0 +1,155 @@
+name: 'Plan Playwright Matrix'
+description: 'Expands a list of Playwright projects and a shard budget into a flat GitHub Actions matrix, one entry per project/shard pair. Supports per-project shard overrides (spend shards where the suite is slow) and a per-project config-file map, so a single matrix can span separate API and UI Playwright configs.'
+
+inputs:
+  projects:
+    description: >-
+      Newline- or comma-separated Playwright project names. Must match the
+      project names declared in the Playwright config(s). Blank entries are
+      ignored.
+    required: true
+  shard-total:
+    description: 'Default shard count applied to every project without an override.'
+    required: false
+    default: '6'
+  project-shard-overrides:
+    description: >-
+      Newline-separated `project=count` overrides. Projects not listed use
+      shard-total. Use this to stop spending six shards on a suite with four
+      tests. Example line: `api=3`.
+    required: false
+    default: ''
+  config-map:
+    description: >-
+      Newline-separated `project=config-file` pairs selecting which Playwright
+      config each project runs under. Projects not listed use default-config.
+      Example line: `api=playwright.api.config.ts`.
+    required: false
+    default: ''
+  default-config:
+    description: 'Playwright config file used by any project absent from config-map.'
+    required: false
+    default: 'playwright.config.ts'
+  summary-title:
+    description: 'Heading used in the step summary. Empty (the default) skips the summary.'
+    required: false
+    default: ''
+
+outputs:
+  matrix:
+    description: >-
+      Flat JSON array, one object per project/shard pair, each
+      `{ name, config, shard, shard_total }`. Consume with
+      `matrix: { entry: fromJson(...) }` and reference `matrix.entry.name`.
+      JSON keys are snake_case so they stay addressable with dot syntax in
+      GitHub expressions.
+    value: ${{ steps.plan.outputs.matrix }}
+  projects:
+    description: 'JSON array of `{ name, config, shard_total }`, one per project — the axis form, for callers that prefer a two-dimensional matrix.'
+    value: ${{ steps.plan.outputs.projects }}
+  job-count:
+    description: 'Total number of matrix entries (project/shard pairs).'
+    value: ${{ steps.plan.outputs.job-count }}
+  project-count:
+    description: 'Number of distinct projects planned.'
+    value: ${{ steps.plan.outputs.project-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Plan matrix
+      id: plan
+      shell: bash
+      env:
+        PROJECTS: ${{ inputs.projects }}
+        SHARD_TOTAL: ${{ inputs.shard-total }}
+        OVERRIDES: ${{ inputs.project-shard-overrides }}
+        CONFIG_MAP: ${{ inputs.config-map }}
+        DEFAULT_CONFIG: ${{ inputs.default-config }}
+      run: |
+        set -euo pipefail
+
+        if ! [[ "$SHARD_TOTAL" =~ ^[0-9]+$ ]] || [ "$SHARD_TOTAL" -lt 1 ]; then
+          echo "::error title=Invalid shard-total::'${SHARD_TOTAL}' must be a positive integer"
+          exit 1
+        fi
+
+        # Accept commas as well as newlines so a caller can pass a short list
+        # inline without a block scalar.
+        projects_json=$(printf '%s\n' "${PROJECTS//,/$'\n'}" | jq -R -n -c \
+          '[inputs | gsub("^\\s+|\\s+$"; "") | select(length > 0)]')
+
+        if [ "$(jq 'length' <<< "$projects_json")" -eq 0 ]; then
+          echo "::error title=No projects::The projects input resolved to an empty list"
+          exit 1
+        fi
+
+        overrides_json=$(printf '%s\n' "$OVERRIDES" | jq -R -n -c \
+          '[inputs | gsub("\\s"; "") | select(length > 0)
+            | capture("^(?<k>[^=]+)=(?<v>[0-9]+)$")
+            | {(.k): (.v | tonumber)}] | add // {}')
+
+        config_json=$(printf '%s\n' "$CONFIG_MAP" | jq -R -n -c \
+          '[inputs | gsub("^\\s+|\\s+$"; "") | select(length > 0)
+            | capture("^(?<k>[^=]+)=(?<v>.+)$")
+            | {(.k | gsub("\\s"; "")): (.v | gsub("^\\s+|\\s+$"; ""))}] | add // {}')
+
+        # An override naming a project that is not being run is nearly always a
+        # typo, and silently ignoring it wastes a whole CI cycle to discover.
+        for key in $(jq -r 'keys[]' <<< "$overrides_json") $(jq -r 'keys[]' <<< "$config_json"); do
+          if [ "$(jq --arg k "$key" 'index($k) != null' <<< "$projects_json")" != "true" ]; then
+            echo "::warning title=Unused override::'${key}' is named in project-shard-overrides or config-map but is not in the projects list"
+          fi
+        done
+
+        plan=$(jq -nc \
+          --argjson projects "$projects_json" \
+          --argjson overrides "$overrides_json" \
+          --argjson configs "$config_json" \
+          --argjson defaultShards "$SHARD_TOTAL" \
+          --arg defaultConfig "$DEFAULT_CONFIG" '
+          [ $projects[]
+            | . as $p
+            | {
+                name: $p,
+                config: (($configs[$p]) // $defaultConfig),
+                shard_total: (($overrides[$p]) // $defaultShards)
+              }
+          ]')
+
+        matrix=$(jq -c '[ .[] | . as $e | [range(1; $e.shard_total + 1)]
+                          | .[] | { name: $e.name, config: $e.config, shard: ., shard_total: $e.shard_total } ]' <<< "$plan")
+
+        job_count=$(jq 'length' <<< "$matrix")
+        project_count=$(jq 'length' <<< "$plan")
+
+        {
+          echo "matrix=${matrix}"
+          echo "projects=${plan}"
+          echo "job-count=${job_count}"
+          echo "project-count=${project_count}"
+        } >> "$GITHUB_OUTPUT"
+
+        echo "::group::Planned matrix"
+        jq -r '.[] | "  \(.name)  shards=\(.shard_total)  config=\(.config)"' <<< "$plan"
+        echo "::endgroup::"
+        echo "::notice title=Matrix planned::${project_count} project(s) → ${job_count} shard job(s)"
+
+    - name: Write summary
+      if: inputs.summary-title != ''
+      shell: bash
+      env:
+        TITLE: ${{ inputs.summary-title }}
+        PLAN: ${{ steps.plan.outputs.projects }}
+        JOB_COUNT: ${{ steps.plan.outputs.job-count }}
+      run: |
+        set -euo pipefail
+        {
+          echo "### ${TITLE}"
+          echo ""
+          echo "| Project | Shards | Config |"
+          echo "| --- | ---: | --- |"
+          jq -r '.[] | "| `\(.name)` | \(.shard_total) | `\(.config)` |"' <<< "$PLAN"
+          echo ""
+          echo "_${JOB_COUNT} shard job(s) total._"
+        } >> "$GITHUB_STEP_SUMMARY"

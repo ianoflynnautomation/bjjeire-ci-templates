@@ -1,0 +1,432 @@
+name: Playwright Report & Gate (Reusable)
+
+# Shared tail for any sharded Playwright run: download the blob reports the
+# matrix job produced, merge them into one HTML/JSON report, summarise the
+# counts, optionally publish to GitHub Pages, and gate the result.
+#
+# Call it as a job with `needs: [<your matrix job>]` and pass that job's result
+# through `test-result`. Nested reusable workflows share the run's artifacts,
+# so the blob reports uploaded by the matrix job are visible here.
+#
+# Required caller permissions (superset of every job below — GitHub rejects the
+# run at parse time if the caller grants less):
+#   contents: read
+#   actions: read
+#   pages: write      # only when publish-report: true
+#   id-token: write   # only when publish-report: true
+#
+# No top-level concurrency here — reusable workflows inherit github.workflow
+# from the caller; declaring the same group in both self-deadlocks. Put
+# concurrency on the caller only.
+#
+# The merge job is container-first: the image is the single source of truth for
+# the Node version, so there is no setup-node step. The publish job runs on the
+# host runner because the Pages deployment actions expect it.
+
+on:
+  workflow_call:
+    inputs:
+      test-result:
+        description: "Result of the upstream matrix test job (`needs.<job>.result`). Drives the gate."
+        required: true
+        type: string
+      test-repo:
+        description: "Owner/repo holding the test code — needed because merging runs `npx playwright`. Empty = the caller repo."
+        required: false
+        type: string
+        default: ""
+      test-repo-ref:
+        description: "Git ref of the test repo to check out (tag, branch, or SHA)."
+        required: false
+        type: string
+        default: ""
+      working-directory:
+        description: "Directory containing package.json / the Playwright config, relative to the checkout."
+        required: false
+        type: string
+        default: "."
+      node-image:
+        description: "Container image providing the Node toolchain for the merge job. Empty string runs on the host runner instead."
+        required: false
+        type: string
+        default: "node:22-bookworm-slim"
+      install-command:
+        description: "Dependency install command run before merging."
+        required: false
+        type: string
+        default: "npm ci --ignore-scripts"
+      reporters:
+        description: "Reporters passed to `playwright merge-reports --reporter`."
+        required: false
+        type: string
+        default: "html,json"
+      blob-artifact-pattern:
+        description: "Artifact name pattern matching the blob reports uploaded by the matrix job."
+        required: false
+        type: string
+        default: "blob-report-*"
+      artifact-prefix:
+        description: >-
+          Prefix for every artifact this workflow uploads. Change it when one
+          run calls this workflow more than once, so the report artifacts of
+          the two runs do not collide.
+        required: false
+        type: string
+        default: "playwright"
+      report-dir:
+        description: "Directory the html reporter writes to, relative to working-directory."
+        required: false
+        type: string
+        default: "playwright-report"
+      results-json-path:
+        description: "Path to the json reporter output, relative to working-directory. Parsed for the pass/fail/flaky counts."
+        required: false
+        type: string
+        default: "test-results/results.json"
+      junit-path:
+        description: "Path to the junit reporter output, relative to working-directory. Only used when upload-junit is true."
+        required: false
+        type: string
+        default: "test-results/junit.xml"
+      upload-junit:
+        description: "Upload the JUnit XML as an artifact. Requires `junit` in reporters."
+        required: false
+        type: boolean
+        default: false
+      fail-on-flaky:
+        description: >-
+          Fail the gate when any test passed only after a retry. Flake policy:
+          on a merge gate, a flake is a failure-in-waiting; on a PR check you
+          may prefer to warn.
+        required: false
+        type: boolean
+        default: false
+      publish-report:
+        description: >-
+          Publish the merged HTML report with the GitHub Pages Actions flow
+          under `reports/<run_id>/`. Requires the repo's Pages source to be set
+          to GitHub Actions and the caller to grant pages: write + id-token: write.
+        required: false
+        type: boolean
+        default: false
+      report-retention-days:
+        description: "Retention in days for the merged HTML report and JSON results."
+        required: false
+        type: number
+        default: 30
+      junit-retention-days:
+        description: "Retention in days for the JUnit artifact — usually longer, since test-history tooling consumes it."
+        required: false
+        type: number
+        default: 90
+      runs-on:
+        description: "Runner label(s) for the merge, publish, and gate jobs."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout in minutes for the merge job."
+        required: false
+        type: number
+        default: 15
+    outputs:
+      status:
+        description: "success | failure — the gated result of the upstream test job."
+        value: ${{ jobs.gate.outputs.status }}
+      passed-count:
+        description: "Number of tests that passed (0 when no report could be merged)."
+        value: ${{ jobs.merge.outputs.passed_count }}
+      failed-count:
+        description: "Number of failed tests across all shards (0 on green)."
+        value: ${{ jobs.merge.outputs.failed_count }}
+      flaky-count:
+        description: "Number of flaky tests — passed only after a retry."
+        value: ${{ jobs.merge.outputs.flaky_count }}
+      skipped-count:
+        description: "Number of skipped tests."
+        value: ${{ jobs.merge.outputs.skipped_count }}
+      report-artifact-name:
+        description: "Name of the merged HTML report artifact."
+        value: ${{ jobs.merge.outputs.report_artifact_name }}
+      report-url:
+        description: "Public URL of the published HTML report. Empty unless publish-report ran successfully."
+        value: ${{ jobs.publish.outputs.report_url }}
+
+jobs:
+  merge:
+    name: Merge reports
+    runs-on: ${{ inputs.runs-on }}
+    container: ${{ inputs.node-image }}
+    if: always()
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      passed_count: ${{ steps.summary.outputs.passed_count }}
+      failed_count: ${{ steps.summary.outputs.failed_count }}
+      flaky_count: ${{ steps.summary.outputs.flaky_count }}
+      skipped_count: ${{ steps.summary.outputs.skipped_count }}
+      report_ready: ${{ steps.merge.outputs.skipped == 'false' }}
+      report_artifact_name: ${{ inputs.artifact-prefix }}-html-report
+    steps:
+      - name: Checkout test repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ${{ inputs.test-repo }}
+          ref: ${{ inputs.test-repo-ref }}
+          persist-credentials: false
+
+      - name: Cache npm downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install dependencies
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          set -euo pipefail
+          echo "::group::${INSTALL_COMMAND}"
+          bash -c "$INSTALL_COMMAND"
+          echo "::endgroup::"
+
+      - name: Download blob reports
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: ${{ inputs.blob-artifact-pattern }}
+          merge-multiple: true
+          path: ${{ inputs.working-directory }}/all-blob-reports
+
+      - name: Merge reports
+        id: merge
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          REPORTERS: ${{ inputs.reporters }}
+        run: |
+          set -o pipefail
+          shopt -s nullglob
+          if [ -z "$(ls -A all-blob-reports 2>/dev/null)" ]; then
+            echo "::warning title=Merge skipped::No blob reports found; nothing to merge"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A shard that crashed, or ran against an unhealthy stack, can upload
+          # an empty or truncated blob zip. `playwright merge-reports` fails hard
+          # on one ("End of central directory record signature not found"), which
+          # would lose the results of every healthy shard. Drop invalid blobs
+          # first so the rest still merge.
+          valid=0
+          for blob in all-blob-reports/*.zip; do
+            if [ -s "$blob" ] && unzip -tqq "$blob" >/dev/null 2>&1; then
+              valid=$((valid + 1))
+            else
+              echo "::warning title=Corrupt blob discarded::${blob} is empty or truncated; excluding it from the merge"
+              rm -f "$blob"
+            fi
+          done
+          if [ "$valid" -eq 0 ]; then
+            echo "::warning title=Merge skipped::No valid blob reports after the integrity check; nothing to merge"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::group::playwright merge-reports (${valid} blob(s))"
+          npx playwright merge-reports --reporter "${REPORTERS}" ./all-blob-reports
+          echo "::endgroup::"
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+
+      - name: Compute summary
+        id: summary
+        if: steps.merge.outputs.skipped == 'false'
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          UPSTREAM_RESULT: ${{ inputs.test-result }}
+          RESULTS_JSON: ${{ inputs.results-json-path }}
+        run: |
+          set -o pipefail
+          read_stat() {
+            jq "${1} // 0" "$RESULTS_JSON" 2>/dev/null || echo 0
+          }
+          passed=$(read_stat '.stats.expected')
+          failed=$(read_stat '.stats.unexpected')
+          flaky=$(read_stat '.stats.flaky')
+          skipped=$(read_stat '.stats.skipped')
+          {
+            echo "passed_count=${passed:-0}"
+            echo "failed_count=${failed:-0}"
+            echo "flaky_count=${flaky:-0}"
+            echo "skipped_count=${skipped:-0}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Playwright results"
+            echo ""
+            echo "| Passed | Failed | Flaky | Skipped | Upstream job |"
+            echo "|-------:|-------:|------:|--------:|--------------|"
+            echo "| ${passed} | ${failed} | ${flaky} | ${skipped} | \`${UPSTREAM_RESULT}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${failed:-0}" -gt 0 ]; then
+            echo "::error title=Tests failed::${failed} failed, ${flaky} flaky"
+          elif [ "${flaky:-0}" -gt 0 ]; then
+            echo "::warning title=Flaky tests::${flaky} test(s) passed only after a retry"
+          else
+            echo "::notice title=All tests passed::0 failed, 0 flaky"
+          fi
+
+      - name: Upload HTML report
+        if: steps.merge.outputs.skipped == 'false'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ inputs.artifact-prefix }}-html-report
+          path: ${{ inputs.working-directory }}/${{ inputs.report-dir }}
+          retention-days: ${{ inputs.report-retention-days }}
+          compression-level: 9
+          if-no-files-found: warn
+
+      - name: Upload JSON results
+        if: steps.merge.outputs.skipped == 'false'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ inputs.artifact-prefix }}-json-results
+          path: ${{ inputs.working-directory }}/${{ inputs.results-json-path }}
+          retention-days: ${{ inputs.report-retention-days }}
+          compression-level: 9
+          if-no-files-found: warn
+
+      - name: Upload JUnit report
+        if: steps.merge.outputs.skipped == 'false' && inputs.upload-junit
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ inputs.artifact-prefix }}-junit
+          path: ${{ inputs.working-directory }}/${{ inputs.junit-path }}
+          retention-days: ${{ inputs.junit-retention-days }}
+          compression-level: 9
+          if-no-files-found: ignore
+
+  publish:
+    name: Publish report (GitHub Pages)
+    runs-on: ${{ inputs.runs-on }}
+    needs: [merge]
+    if: ${{ !cancelled() && inputs.publish-report && needs.merge.outputs.report_ready == 'true' }}
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      pages: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      # Unique per attempt so a re-run does not collide with the artifact the
+      # previous attempt uploaded.
+      PAGES_ARTIFACT_NAME: ${{ inputs.artifact-prefix }}-pages-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      report_url: ${{ steps.report-url.outputs.report_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6
+
+      - name: Download HTML report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.merge.outputs.report_artifact_name }}
+          path: ${{ runner.temp }}/html-report
+
+      - name: Prepare Pages artifact
+        shell: bash
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          pages_dir="${RUNNER_TEMP}/pages"
+          report_dir="${pages_dir}/reports/${RUN_ID}"
+          mkdir -p "${report_dir}"
+          cp -R "${RUNNER_TEMP}/html-report/." "${report_dir}/"
+          touch "${pages_dir}/.nojekyll"
+          cat > "${pages_dir}/index.html" <<EOF
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8">
+              <meta http-equiv="refresh" content="0; url=reports/${RUN_ID}/">
+              <title>Playwright Test Report</title>
+            </head>
+            <body>
+              <p><a href="reports/${RUN_ID}/">Open Playwright test report</a></p>
+            </body>
+          </html>
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5
+        with:
+          name: ${{ env.PAGES_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/pages
+          include-hidden-files: true
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128  # v5
+        with:
+          artifact_name: ${{ env.PAGES_ARTIFACT_NAME }}
+
+      - name: Publish report URL
+        id: report-url
+        shell: bash
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          url="${PAGE_URL%/}/reports/${RUN_ID}/"
+          echo "report_url=${url}" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Report published::${url}"
+          {
+            echo "## Playwright HTML report"
+            echo ""
+            echo "${url}"
+            echo ""
+            echo "_The first deployment after switching Pages to GitHub Actions can take ~1 minute to go live._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  gate:
+    name: Result gate
+    runs-on: ${{ inputs.runs-on }}
+    needs: [merge]
+    if: always()
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      status: ${{ steps.eval.outputs.status }}
+    steps:
+      - name: Evaluate result
+        id: eval
+        shell: bash
+        env:
+          TEST_RESULT: ${{ inputs.test-result }}
+          FAIL_ON_FLAKY: ${{ inputs.fail-on-flaky }}
+          FLAKY: ${{ needs.merge.outputs.flaky_count }}
+          FAILED: ${{ needs.merge.outputs.failed_count }}
+        run: |
+          set -euo pipefail
+          if [ "$TEST_RESULT" = "failure" ] || [ "$TEST_RESULT" = "cancelled" ]; then
+            echo "::error title=Gate failed::Upstream test job result was '${TEST_RESULT}' (${FAILED:-0} failed test(s))"
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ "${FAIL_ON_FLAKY}" = "true" ] && [ "${FLAKY:-0}" -gt 0 ]; then
+            echo "::error title=Gate failed::${FLAKY} flaky test(s) and fail-on-flaky is enabled — fix or quarantine them"
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "::notice title=Gate passed::Upstream test job result was '${TEST_RESULT}' (flaky: ${FLAKY:-0})"
+          echo "status=success" >> "$GITHUB_OUTPUT"

@@ -45,3 +45,19 @@ updates:
     directory: "/actions/maven-openapi-export"
     schedule:
       interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/setup-java-cached"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/azure-aks-login"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/wait-for-http"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/playwright-plan-matrix"
+    schedule:
+      interval: weekly

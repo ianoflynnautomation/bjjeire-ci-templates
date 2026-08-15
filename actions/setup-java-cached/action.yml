@@ -1,0 +1,127 @@
+name: 'Setup Java Cached'
+description: 'Installs a JDK and restores the build-tool dependency cache (Maven ~/.m2, Gradle ~/.gradle). In container-first jobs whose image already ships the JDK, set install-jdk=false to restore only the cache — matching actions/setup-node-cached and actions/setup-dotnet-cached.'
+
+inputs:
+  java-version:
+    description: 'JDK version to install. Ignored when install-jdk is "false".'
+    required: false
+    default: '21'
+  java-distribution:
+    description: 'JDK distribution passed to actions/setup-java (temurin, zulu, corretto, microsoft, ...).'
+    required: false
+    default: 'temurin'
+  build-tool:
+    description: 'Dependency cache layout to restore: maven | gradle | sbt.'
+    required: false
+    default: 'maven'
+  working-directory:
+    description: 'Directory containing the build file (pom.xml / build.gradle). Used to derive the default cache-dependency-path.'
+    required: false
+    default: '.'
+  cache-dependency-path:
+    description: >-
+      Explicit glob(s) whose hash keys the cache. Empty derives it from
+      build-tool and working-directory (e.g. `<dir>/pom.xml`). Set this for
+      multi-module builds that must key on every module descriptor.
+    required: false
+    default: ''
+  install-jdk:
+    description: >-
+      When "true" (default) run actions/setup-java, which installs the JDK and
+      manages the dependency cache itself. Set "false" for container-first jobs
+      where the image is the source of truth for the toolchain — only the
+      dependency cache is restored then.
+    required: false
+    default: 'true'
+  cache:
+    description: 'Set "false" to skip dependency caching entirely (e.g. release jobs that must resolve fresh).'
+    required: false
+    default: 'true'
+  cache-key-prefix:
+    description: 'Prefix for the cache key when install-jdk is "false" — segment monorepo caches per module.'
+    required: false
+    default: 'java'
+
+outputs:
+  java-home:
+    description: 'JAVA_HOME of the installed JDK. Empty when install-jdk is "false".'
+    value: ${{ steps.setup-java.outputs.path }}
+  java-version:
+    description: 'Resolved JDK version. Empty when install-jdk is "false".'
+    value: ${{ steps.setup-java.outputs.version }}
+  cache-hit:
+    description: '"true" when the dependency cache was restored from an exact key match.'
+    value: ${{ steps.setup-java.outputs.cache-hit || steps.dependency-cache.outputs.cache-hit }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve cache dependency path
+      id: resolve
+      shell: bash
+      env:
+        BUILD_TOOL: ${{ inputs.build-tool }}
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        EXPLICIT_PATH: ${{ inputs.cache-dependency-path }}
+      run: |
+        set -euo pipefail
+        dir="${WORKING_DIRECTORY%/}"
+        [ -z "$dir" ] && dir="."
+        if [ -n "${EXPLICIT_PATH//[[:space:]]/}" ]; then
+          path="$EXPLICIT_PATH"
+        else
+          case "$BUILD_TOOL" in
+            maven)  path="${dir}/pom.xml" ;;
+            gradle) path="${dir}/*.gradle*"$'\n'"${dir}/**/gradle-wrapper.properties" ;;
+            sbt)    path="${dir}/**/*.sbt"$'\n'"${dir}/project/build.properties" ;;
+            *)
+              echo "::error title=Unsupported build-tool::'${BUILD_TOOL}' is not one of maven|gradle|sbt"
+              exit 1 ;;
+          esac
+        fi
+        DELIM="path_$(date +%s%N)"
+        {
+          echo "path<<${DELIM}"
+          printf '%s\n' "$path"
+          echo "${DELIM}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Set up JDK
+      id: setup-java
+      if: inputs.install-jdk == 'true'
+      uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95  # v5.6.0
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: ${{ inputs.java-distribution }}
+        cache: ${{ inputs.cache == 'true' && inputs.build-tool || '' }}
+        cache-dependency-path: ${{ steps.resolve.outputs.path }}
+
+    # Container-first path: the image ships the JDK, so only the dependency
+    # cache is restored. Mirrors actions/setup-node-cached.
+    - name: Cache build-tool dependencies
+      id: dependency-cache
+      if: inputs.install-jdk != 'true' && inputs.cache == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ${{ inputs.build-tool == 'maven' && '~/.m2/repository' || inputs.build-tool == 'gradle' && '~/.gradle/caches' || '~/.ivy2/cache' }}
+        key: ${{ runner.os }}-${{ inputs.cache-key-prefix }}-${{ inputs.build-tool }}-${{ hashFiles(steps.resolve.outputs.path) }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.cache-key-prefix }}-${{ inputs.build-tool }}-
+
+    - name: Report toolchain
+      shell: bash
+      env:
+        INSTALL_JDK: ${{ inputs.install-jdk }}
+        BUILD_TOOL: ${{ inputs.build-tool }}
+        JAVA_DISTRIBUTION: ${{ inputs.java-distribution }}
+        RESOLVED_VERSION: ${{ steps.setup-java.outputs.version }}
+        REQUESTED_VERSION: ${{ inputs.java-version }}
+        CACHE_HIT: ${{ steps.setup-java.outputs.cache-hit || steps.dependency-cache.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        if [ "$INSTALL_JDK" = "true" ]; then
+          source="${JAVA_DISTRIBUTION} ${RESOLVED_VERSION:-$REQUESTED_VERSION}"
+        else
+          source="container image ($(java -version 2>&1 | head -n1))"
+        fi
+        echo "::notice title=Java toolchain::${source} — ${BUILD_TOOL} cache-hit=${CACHE_HIT:-false}"

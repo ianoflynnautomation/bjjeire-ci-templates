@@ -1,8 +1,7 @@
 name: Lint Workflows (Reusable)
 
 # Shared actionlint + zizmor + deprecated-command gate for GitHub Actions
-# workflows. Repo-specific extras (yamllint configs, etc.) stay in the caller
-# as sibling jobs.
+# workflows, plus an optional yamllint pass.
 #
 # Required caller permissions:
 #   contents: read
@@ -36,6 +35,31 @@ on:
         required: false
         type: string
         default: "error"
+      yamllint:
+        description: "Run yamllint as a sibling job. Requires a config file at yamllint-config in the caller repo."
+        required: false
+        type: boolean
+        default: false
+      yamllint-paths:
+        description: "Space-separated paths linted by yamllint."
+        required: false
+        type: string
+        default: ".github/workflows/"
+      yamllint-config:
+        description: "Path to the yamllint config file in the caller repo."
+        required: false
+        type: string
+        default: ".yamllint.yml"
+      yamllint-version:
+        description: "yamllint version installed via pipx."
+        required: false
+        type: string
+        default: "1.35.1"
+      yamllint-enforce:
+        description: "When false, yamllint findings are reported but do not fail the job."
+        required: false
+        type: boolean
+        default: true
       runs-on:
         description: "Runner label for the lint job."
         required: false
@@ -100,4 +124,36 @@ jobs:
             echo "| zizmor | \`${ZIZMOR_PATHS}\` (enforce=${ZIZMOR_ENFORCE}) |"
             echo "| deprecated commands | \`${ZIZMOR_PATHS}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  yamllint:
+    name: yamllint
+    if: inputs.yamllint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Run yamllint
+        continue-on-error: ${{ !inputs.yamllint-enforce }}
+        shell: bash
+        env:
+          YAMLLINT_VERSION: ${{ inputs.yamllint-version }}
+          YAMLLINT_CONFIG: ${{ inputs.yamllint-config }}
+          YAMLLINT_PATHS: ${{ inputs.yamllint-paths }}
+        run: |
+          set -euo pipefail
+          read -ra paths <<< "$YAMLLINT_PATHS"
+          args=(--format github)
+          if [ -f "$YAMLLINT_CONFIG" ]; then
+            args+=(-c "$YAMLLINT_CONFIG")
+          else
+            echo "::warning title=yamllint config missing::${YAMLLINT_CONFIG} not found; falling back to yamllint's default ruleset"
+          fi
+          echo "::group::yamllint ${YAMLLINT_PATHS}"
+          pipx run "yamllint==${YAMLLINT_VERSION}" "${args[@]}" "${paths[@]}"
+          echo "::endgroup::"
+          echo "::notice title=yamllint::No blocking findings in ${YAMLLINT_PATHS}"
 

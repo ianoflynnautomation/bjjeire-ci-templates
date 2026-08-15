@@ -1,0 +1,112 @@
+# Example caller: Java/Maven PR validation using the shared maven-build-test
+# workflow, plus the setup-java-cached composite for the jobs that need a JDK
+# but not a full `mvn verify`.
+# Copy into your repo as .github/workflows/ci-pr.yml and adjust paths.
+name: Java CI
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build & Test
+    permissions:
+      contents: read
+      checks: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/maven-build-test.yml@v1
+    with:
+      working-directory: src/my-api
+      java-version: "25"
+      maven-goals: verify
+      publish-test-report: true
+      test-report-name: Java Test Results
+
+  # A job that needs the JDK but not the full verify cycle: setup-java-cached
+  # installs the toolchain and restores ~/.m2 in one step.
+  openapi-contract:
+    name: OpenAPI Contract
+    runs-on: ubuntu-latest
+    needs: [build-test]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: ianoflynnautomation/bjjeire-ci-templates/actions/setup-java-cached@v1
+        with:
+          java-version: "25"
+          build-tool: maven
+          working-directory: src/my-api
+
+      - name: Export the OpenAPI document
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/maven-openapi-export@v1
+        with:
+          working-directory: src/my-api
+          it-test: OpenApiContractIT
+          output-path: ${{ github.workspace }}/artifacts/openapi/openapi-v1.json
+
+      - name: Fail on breaking changes
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/openapi-breaking-gate@v1
+        with:
+          current-spec: artifacts/openapi/openapi-v1.json
+          image: ghcr.io/${{ github.repository_owner }}/my-api-contract
+          token: ${{ github.token }}
+          user: ${{ github.actor }}
+
+  # Container-first variant: the image already ships the JDK, so only the
+  # dependency cache is restored. Mirrors setup-node-cached / setup-dotnet-cached.
+  validate-data:
+    name: Validate Data
+    runs-on: ubuntu-latest
+    container:
+      image: maven:3.9-eclipse-temurin-25
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: ianoflynnautomation/bjjeire-ci-templates/actions/setup-java-cached@v1
+        with:
+          install-jdk: 'false'
+          build-tool: maven
+          working-directory: src/my-api
+          cache-key-prefix: my-api
+
+      - name: Validate seed data against the domain entities
+        shell: bash
+        working-directory: src/my-api
+        run: |
+          set -euo pipefail
+          echo "::group::mvn package"
+          mvn --batch-mode --no-transfer-progress -DskipTests package
+          echo "::endgroup::"
+          java -jar target/my-api-*.jar --spring.profiles.active=seeder --validate
+
+  pr-complete:
+    name: PR Checks Complete
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [build-test, openapi-contract, validate-data]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: ianoflynnautomation/bjjeire-ci-templates/actions/check-required-jobs@v1
+        with:
+          needs-json: ${{ toJson(needs) }}
+          summary-title: PR checks
