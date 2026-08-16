@@ -16,9 +16,15 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`playwright-report.yml`](.github/workflows/playwright-report.yml) | Shared tail for any sharded Playwright run: merge blob reports, summarise counts, publish to Pages, gate on failures/flakes |
 | [`docker-build-push.yml`](.github/workflows/docker-build-push.yml) | Multi-arch buildx build with GHA cache, SBOM + provenance attestation, cosign keyless signing, Trivy scan → code scanning |
 | [`security-scan.yml`](.github/workflows/security-scan.yml) | Dependency review + gitleaks secret scan + Semgrep SAST, each independently toggleable |
+| [`terraform-quality.yml`](.github/workflows/terraform-quality.yml) | Credential-free tier: fmt + backend-less validate + tflint (root and per-module), sticky PR comment, per-check gate. Runs on fork PRs |
+| [`iac-scan.yml`](.github/workflows/iac-scan.yml) | Trivy misconfiguration scan over IaC source (Terraform, CFN, Helm, Dockerfile) → SARIF to code scanning |
 | [`terraform-plan.yml`](.github/workflows/terraform-plan.yml) | fmt + validate + plan (Azure OIDC), plan artifact + step summary, `has-changes` output |
 | [`terraform-apply.yml`](.github/workflows/terraform-apply.yml) | Applies the exact plan artifact, gated by a GitHub environment (required reviewers) |
-| [`lint-workflows.yml`](.github/workflows/lint-workflows.yml) | actionlint + zizmor + deprecated-command gate for a repo's workflow files |
+| [`kubernetes-manifest-validation.yml`](.github/workflows/kubernetes-manifest-validation.yml) | Render Kustomize overlays (globs, no cluster list), helm lint, kubeconform schema gate, content deny-pattern, rendered-manifests artifact |
+| [`kubernetes-policy-scan.yml`](.github/workflows/kubernetes-policy-scan.yml) | Trivy misconfig (+ SARIF to code scanning), Polaris audit and hadolint over already-rendered manifests |
+| [`flux-local.yml`](.github/workflows/flux-local.yml) | Offline Flux verification: `flux-local test` per cluster, plus a PR-vs-base `diff` posted as a sticky comment |
+| [`renovate.yml`](.github/workflows/renovate.yml) | Self-hosted Renovate run with runtime-substituted host rules for private registries |
+| [`lint-workflows.yml`](.github/workflows/lint-workflows.yml) | actionlint + zizmor + deprecated-command gate for a repo's workflow files, optional yamllint (file or inline config) |
 | [`sync-labels.yml`](.github/workflows/sync-labels.yml) | Upsert repository labels from a version-controlled YAML file (never deletes; `dry-run` supported) |
 | [`cleanup-artifacts.yml`](.github/workflows/cleanup-artifacts.yml) | Scheduled cleanup of artifacts and stale non-default-branch workflow runs (caches opt-in) |
 
@@ -37,8 +43,13 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`actions/maven-openapi-export`](actions/maven-openapi-export/action.yml) | Run the failsafe IT that writes the OpenAPI document, then validate the JSON |
 | [`actions/openapi-breaking-gate`](actions/openapi-breaking-gate/action.yml) | Pull the last published OpenAPI contract from an OCI registry and fail on breaking changes (oasdiff); skips only on genuine first publish |
 | [`actions/oci-push-artifact`](actions/oci-push-artifact/action.yml) | Publish a file to any OCI registry as a typed artifact with ORAS; extra tags alias one digest |
+| [`actions/oci-tag-audit`](actions/oci-tag-audit/action.yml) | Assert caller-supplied `repository:tag` refs exist in any Registry v2 host; fails closed on probe errors. Extracting the pins stays in the caller |
+| [`actions/setup-kubernetes-tools`](actions/setup-kubernetes-tools/action.yml) | Flux CLI, Kustomize, kubeconform and Helm — each installed only when you pass its version |
+| [`actions/kustomize-render`](actions/kustomize-render/action.yml) | Build a glob-matched set of overlays into one output dir; empty/missing kustomizations annotate instead of failing |
 
 Full input/output documentation lives in each workflow's `workflow_call` block — every input has a description, type, and default. Ready-to-copy caller workflows are in [`examples/`](examples/).
+
+> **Moving a Flux GitOps repo onto these?** Cluster lists become globs, rendering happens once and is shared by artifact, and check names change. See [`docs/migrating-gitops-workflows.md`](docs/migrating-gitops-workflows.md).
 
 > **Migrating from the Playwright workflows in `bjjeire-tests`?** The inputs were renamed to `kebab-case`, the fourteen named secrets collapsed into one `test-env-vars` payload, and `runner_label` became `runs-on` with a different default. See [`docs/migrating-playwright-workflows.md`](docs/migrating-playwright-workflows.md).
 

@@ -1,0 +1,29 @@
+name: Terraform Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality Checks
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/terraform-quality.yml@v1
+    with:
+      terraform-version: "1.10.5"
+      tflint-version: "v0.53.0"
+      tflint-var-file: environments/dev/example.tfvars
+      tflint-module-paths: "modules/*/"
+      # tflint-enforce: false

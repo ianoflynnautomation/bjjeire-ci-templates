@@ -1,0 +1,182 @@
+name: IaC Scan (Reusable)
+
+# Trivy misconfiguration scan over infrastructure-as-code checked into the repo
+# — Terraform, CloudFormation, Helm, Dockerfiles, plain Kubernetes YAML — with
+# the findings published to GitHub code scanning as SARIF.
+#
+# For Kubernetes manifests that have to be rendered from Kustomize overlays
+# first, use kubernetes-policy-scan.yml instead: it consumes a rendered
+# artifact and adds the Polaris best-practice audit.
+#
+# Required caller permissions:
+#   contents: read
+#   security-events: write   # only when upload-sarif: true (the default)
+
+on:
+  workflow_call:
+    inputs:
+      scan-path:
+        description: "Path scanned by Trivy, relative to the repository root."
+        required: false
+        type: string
+        default: "."
+      severity:
+        description: "Comma-separated severities reported and gated on."
+        required: false
+        type: string
+        default: "CRITICAL,HIGH"
+      enforce:
+        description: "When true, findings at or above `severity` fail the job. Set false to report into code scanning without blocking."
+        required: false
+        type: boolean
+        default: true
+      ignore-unfixed:
+        description: "Ignore findings that have no available fix."
+        required: false
+        type: boolean
+        default: true
+      trivyignore-file:
+        description: 'Comma-separated .trivyignore files, e.g. ".trivyignore". Empty applies no ignore file.'
+        required: false
+        type: string
+        default: ""
+      trivy-config-file:
+        description: 'Trivy config file (e.g. "trivy.yaml") holding skip-dirs and other options. Empty uses Trivy defaults.'
+        required: false
+        type: string
+        default: ""
+      trivy-version:
+        description: >-
+          Trivy version installed by the scanner action, with the leading "v".
+          Pinned rather than left empty: the action forwards this value straight
+          to its installer, so an empty string would not fall back to a default.
+        required: false
+        type: string
+        default: "v0.70.0"
+      upload-sarif:
+        description: "Upload the SARIF report to GitHub code scanning. Automatically skipped for forked-PR runs, which cannot write to code scanning."
+        required: false
+        type: boolean
+        default: true
+      sarif-category:
+        description: "Code scanning category. Give each scan in a repo its own category or uploads overwrite each other."
+        required: false
+        type: string
+        default: "trivy-iac"
+      runs-on:
+        description: "Runner label for the scan job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout for the scan job."
+        required: false
+        type: number
+        default: 20
+
+jobs:
+  scan:
+    name: Trivy IaC scan
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Resolve Trivy config
+        id: config
+        env:
+          IGNORE_FILE: ${{ inputs.trivyignore-file }}
+          CONFIG_FILE: ${{ inputs.trivy-config-file }}
+        run: |
+          set -euo pipefail
+          resolved_ignores=""
+          if [ -n "$IGNORE_FILE" ]; then
+            IFS=',' read -ra files <<< "$IGNORE_FILE"
+            for f in "${files[@]}"; do
+              if [ -f "$f" ]; then
+                resolved_ignores="${resolved_ignores:+${resolved_ignores},}${f}"
+              else
+                echo "::warning title=Missing trivyignore::${f} not found — continuing without it"
+              fi
+            done
+          fi
+
+          resolved_config=""
+          if [ -n "$CONFIG_FILE" ]; then
+            if [ -f "$CONFIG_FILE" ]; then
+              resolved_config="$CONFIG_FILE"
+            else
+              echo "::warning title=Missing Trivy config::${CONFIG_FILE} not found — using Trivy defaults"
+            fi
+          fi
+
+          echo "ignores=${resolved_ignores}" >> "$GITHUB_OUTPUT"
+          echo "config=${resolved_config}" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy IaC misconfiguration scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: ${{ inputs.scan-path }}
+          hide-progress: true
+          format: sarif
+          output: trivy-iac-results.sarif
+          severity: ${{ inputs.severity }}
+          ignore-unfixed: ${{ inputs.ignore-unfixed }}
+          trivyignores: ${{ steps.config.outputs.ignores }}
+          trivy-config: ${{ steps.config.outputs.config }}
+          version: ${{ inputs.trivy-version }}
+          exit-code: "0"
+
+      - name: Upload SARIF to code scanning
+        if: >-
+          always() &&
+          inputs.upload-sarif &&
+          hashFiles('trivy-iac-results.sarif') != '' &&
+          (github.event_name != 'pull_request' ||
+           github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
+        with:
+          sarif_file: trivy-iac-results.sarif
+          category: ${{ inputs.sarif-category }}
+
+      - name: Gate on findings
+        if: always()
+        env:
+          ENFORCE: ${{ inputs.enforce }}
+          SEVERITY: ${{ inputs.severity }}
+          SCAN_PATH: ${{ inputs.scan-path }}
+        run: |
+          set -euo pipefail
+          if [ ! -f trivy-iac-results.sarif ]; then
+            echo "::error title=No SARIF::Trivy produced no report — the scan step did not complete"
+            exit 1
+          fi
+
+          # One SARIF result per finding; count them rather than re-running the
+          # scan, so the gate and the code scanning upload can never disagree.
+          count="$(jq '[.runs[].results[]?] | length' trivy-iac-results.sarif)"
+
+          {
+            echo "### Trivy IaC scan"
+            echo ""
+            echo "| Scope | Severity | Findings | Enforced |"
+            echo "| --- | --- | --- | --- |"
+            echo "| \`${SCAN_PATH}\` | ${SEVERITY} | ${count} | ${ENFORCE} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$count" -eq 0 ]; then
+            echo "::notice title=Trivy IaC::No ${SEVERITY} misconfigurations found in ${SCAN_PATH}"
+            exit 0
+          fi
+
+          if [ "$ENFORCE" = "true" ]; then
+            echo "::error title=Trivy IaC::${count} ${SEVERITY} misconfiguration(s) found in ${SCAN_PATH}"
+            exit 1
+          fi
+          echo "::warning title=Trivy IaC::${count} ${SEVERITY} misconfiguration(s) found in ${SCAN_PATH} (not enforced)"

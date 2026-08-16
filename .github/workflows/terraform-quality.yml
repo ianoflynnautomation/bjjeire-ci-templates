@@ -1,0 +1,336 @@
+name: Terraform Quality (Reusable)
+
+# Credential-free Terraform quality tier: fmt, validate and tflint, with an
+# optional sticky PR comment and an independently configurable gate per check.
+#
+# This deliberately runs `terraform init -backend=false` and never touches a
+# cloud provider, so it works on fork pull requests and needs no OIDC secrets.
+# For anything that must reach real state, use terraform-plan.yml.
+#
+# Required caller permissions:
+#   contents: read
+#   pull-requests: write   # only when comment-on-pr: true (the default)
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Directory the Terraform configuration lives in."
+        required: false
+        type: string
+        default: "."
+      terraform-version:
+        description: "Terraform version installed by hashicorp/setup-terraform."
+        required: false
+        type: string
+        default: "1.10.5"
+      fmt:
+        description: "Run `terraform fmt -check -recursive -diff`."
+        required: false
+        type: boolean
+        default: true
+      fmt-enforce:
+        description: "When false, formatting drift is reported but does not fail the job."
+        required: false
+        type: boolean
+        default: true
+      validate:
+        description: "Run `terraform validate` after a backend-less init."
+        required: false
+        type: boolean
+        default: true
+      validate-enforce:
+        description: "When false, validation errors are reported but do not fail the job."
+        required: false
+        type: boolean
+        default: true
+      init-args:
+        description: 'Extra arguments for `terraform init`. `-backend=false` is always applied — this tier must not need credentials.'
+        required: false
+        type: string
+        default: ""
+      tflint:
+        description: "Run tflint."
+        required: false
+        type: boolean
+        default: true
+      tflint-version:
+        description: 'tflint version, with the leading "v" (e.g. "v0.53.0").'
+        required: false
+        type: string
+        default: "v0.53.0"
+      tflint-var-file:
+        description: >-
+          Optional var file passed to the root tflint run. Static analysis has no
+          caller-supplied tfvars, so variables with a null default can trip
+          interpolation rules; pointing at a representative example file avoids
+          false positives. Path is relative to working-directory.
+        required: false
+        type: string
+        default: ""
+      tflint-module-paths:
+        description: >-
+          Space-separated globs of module directories linted individually after
+          the root, e.g. "modules/*/". `--var-file` is root-relative and cannot
+          be combined with `--recursive`, so modules are linted bare. Empty
+          skips per-module linting.
+        required: false
+        type: string
+        default: ""
+      tflint-args:
+        description: "Extra arguments appended to every tflint invocation."
+        required: false
+        type: string
+        default: ""
+      tflint-enforce:
+        description: "When false, tflint findings are reported but do not fail the job."
+        required: false
+        type: boolean
+        default: true
+      comment-on-pr:
+        description: "Post a results table as a sticky PR comment, updated in place on each push. Requires pull-requests: write."
+        required: false
+        type: boolean
+        default: true
+      comment-title:
+        description: "Heading of the sticky comment. Also identifies the comment for in-place updates, so keep it stable per repo."
+        required: false
+        type: string
+        default: "Terraform Quality Checks"
+      runs-on:
+        description: "Runner label for the quality job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout for the quality job."
+        required: false
+        type: number
+        default: 15
+    outputs:
+      fmt-outcome:
+        description: "Outcome of the fmt check: success | failure | skipped."
+        value: ${{ jobs.quality.outputs.fmt-outcome }}
+      validate-outcome:
+        description: "Outcome of terraform validate: success | failure | skipped."
+        value: ${{ jobs.quality.outputs.validate-outcome }}
+      tflint-outcome:
+        description: "Outcome of the tflint run: success | failure | skipped."
+        value: ${{ jobs.quality.outputs.tflint-outcome }}
+
+jobs:
+  quality:
+    name: Quality checks
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      fmt-outcome: ${{ steps.fmt.outcome }}
+      validate-outcome: ${{ steps.validate.outcome }}
+      tflint-outcome: ${{ steps.tflint.outcome }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        id: fmt
+        if: inputs.fmt
+        continue-on-error: true
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          echo "::group::terraform fmt"
+          terraform fmt -check -recursive -diff
+          echo "::endgroup::"
+
+      - name: Terraform init
+        if: inputs.validate
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          INIT_ARGS: ${{ inputs.init-args }}
+        run: |
+          set -euo pipefail
+          read -ra extra <<< "$INIT_ARGS"
+          echo "::group::terraform init"
+          terraform init -backend=false "${extra[@]}"
+          echo "::endgroup::"
+
+      - name: Terraform validate
+        id: validate
+        if: inputs.validate
+        continue-on-error: true
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          echo "::group::terraform validate"
+          terraform validate -no-color
+          echo "::endgroup::"
+
+      - name: Setup TFLint
+        if: inputs.tflint
+        uses: terraform-linters/setup-tflint@4cb9feea73331a35b422df102992a03a44a3bb33  # v6.2.1
+        with:
+          tflint_version: ${{ inputs.tflint-version }}
+
+      - name: TFLint init
+        if: inputs.tflint
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: tflint --init
+
+      - name: TFLint
+        id: tflint
+        if: inputs.tflint
+        continue-on-error: true
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          VAR_FILE: ${{ inputs.tflint-var-file }}
+          MODULE_PATHS: ${{ inputs.tflint-module-paths }}
+          EXTRA_ARGS: ${{ inputs.tflint-args }}
+        run: |
+          set -euo pipefail
+          read -ra extra <<< "$EXTRA_ARGS"
+
+          root_args=(--format=compact)
+          if [ -n "$VAR_FILE" ]; then
+            if [ -f "$VAR_FILE" ]; then
+              root_args+=(--var-file="$VAR_FILE")
+            else
+              echo "::warning title=tflint var-file missing::${VAR_FILE} not found; linting without representative values"
+            fi
+          fi
+
+          failed=0
+          echo "::group::tflint (root)"
+          tflint "${root_args[@]}" "${extra[@]}" || failed=1
+          echo "::endgroup::"
+
+          if [ -n "$MODULE_PATHS" ]; then
+            shopt -s nullglob
+            read -ra patterns <<< "$MODULE_PATHS"
+            for pattern in "${patterns[@]}"; do
+              # Unquoted on purpose: expands the caller's glob.
+              # shellcheck disable=SC2086
+              for dir in $pattern; do
+                [ -d "$dir" ] || continue
+                echo "::group::tflint ${dir}"
+                # --var-file is root-relative and cannot ride along with a
+                # per-module --chdir, so modules are linted bare.
+                tflint --chdir="$dir" --format=compact "${extra[@]}" || failed=1
+                echo "::endgroup::"
+              done
+            done
+          fi
+
+          exit "$failed"
+
+      - name: Write quality summary
+        if: always()
+        env:
+          TITLE: ${{ inputs.comment-title }}
+          FMT: ${{ steps.fmt.outcome }}
+          VALIDATE: ${{ steps.validate.outcome }}
+          TFLINT: ${{ steps.tflint.outcome }}
+          FMT_ENFORCE: ${{ inputs.fmt-enforce }}
+          VALIDATE_ENFORCE: ${{ inputs.validate-enforce }}
+          TFLINT_ENFORCE: ${{ inputs.tflint-enforce }}
+          WORKING_DIR: ${{ inputs.working-directory }}
+        run: |
+          {
+            echo "### ${TITLE}"
+            echo ""
+            echo "Directory: \`${WORKING_DIR}\`"
+            echo ""
+            echo "| Check | Result | Enforced |"
+            echo "| --- | --- | --- |"
+            echo "| Format | ${FMT:-skipped} | ${FMT_ENFORCE} |"
+            echo "| Validate | ${VALIDATE:-skipped} | ${VALIDATE_ENFORCE} |"
+            echo "| TFLint | ${TFLINT:-skipped} | ${TFLINT_ENFORCE} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment results on PR
+        if: ${{ always() && inputs.comment-on-pr && github.event_name == 'pull_request' }}
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          TITLE: ${{ inputs.comment-title }}
+          FMT: ${{ steps.fmt.outcome }}
+          VALIDATE: ${{ steps.validate.outcome }}
+          TFLINT: ${{ steps.tflint.outcome }}
+          WORKING_DIR: ${{ inputs.working-directory }}
+        with:
+          script: |
+            const title = process.env.TITLE;
+            const icon = (o) => o === 'success' ? '✅' : (o === 'skipped' || !o) ? '➖' : '❌';
+            const row = (label, outcome) =>
+              `| ${label} | \`${outcome || 'skipped'}\` | ${icon(outcome)} |`;
+
+            const body = [
+              `### ${title}`,
+              '',
+              `Directory: \`${process.env.WORKING_DIR}\``,
+              '',
+              '| Check | Result | Status |',
+              '| --- | --- | --- |',
+              row('Format', process.env.FMT),
+              row('Validate', process.env.VALIDATE),
+              row('TFLint', process.env.TFLINT),
+              '',
+              `*Triggered by @${context.actor} · \`${context.eventName}\` · workflow \`${process.env.GITHUB_WORKFLOW}\`*`,
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            // Identify our comment by its heading so repeated pushes edit one
+            // comment instead of spamming the thread.
+            const existing = comments.find((c) => c.user.type === 'Bot' && c.body?.includes(title));
+
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Gate
+        if: always()
+        env:
+          FMT: ${{ steps.fmt.outcome }}
+          VALIDATE: ${{ steps.validate.outcome }}
+          TFLINT: ${{ steps.tflint.outcome }}
+          FMT_ENFORCE: ${{ inputs.fmt-enforce }}
+          VALIDATE_ENFORCE: ${{ inputs.validate-enforce }}
+          TFLINT_ENFORCE: ${{ inputs.tflint-enforce }}
+        run: |
+          set -euo pipefail
+          failed=0
+          check() {
+            local name="$1" outcome="$2" enforce="$3"
+            [ "$outcome" = "failure" ] || return 0
+            if [ "$enforce" = "true" ]; then
+              echo "::error title=${name} failed::${name} reported problems — see the logs above"
+              failed=1
+            else
+              echo "::warning title=${name} failed::${name} reported problems (not enforced)"
+            fi
+          }
+          check "terraform fmt" "${FMT:-skipped}" "$FMT_ENFORCE"
+          check "terraform validate" "${VALIDATE:-skipped}" "$VALIDATE_ENFORCE"
+          check "tflint" "${TFLINT:-skipped}" "$TFLINT_ENFORCE"
+
+          if [ "$failed" -eq 0 ]; then
+            echo "::notice title=Terraform quality::All enforced checks passed"
+          fi
+          exit "$failed"

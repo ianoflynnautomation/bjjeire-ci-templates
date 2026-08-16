@@ -1,0 +1,35 @@
+name: IaC Scan
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.tf"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.tf"
+  schedule:
+    - cron: "0 5 * * 1" # new Trivy rules land against unchanged code
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: Trivy IaC
+    permissions:
+      contents: read
+      security-events: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/iac-scan.yml@v1
+    with:
+      scan-path: "."
+      severity: CRITICAL,HIGH
+      trivyignore-file: .trivyignore
+      trivy-config-file: trivy.yaml
+      sarif-category: trivy-terraform
