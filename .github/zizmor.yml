@@ -10,3 +10,8 @@ rules:
   artipacked:
     ignore:
       - release.yml
+
+  excessive-permissions:
+    ignore:
+      - playwright-tests.yml
+      - playwright-docker-tests.yml
