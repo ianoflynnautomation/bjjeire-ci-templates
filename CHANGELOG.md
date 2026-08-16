@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.1.0...v1.2.0) (2026-08-16)
+
+
+### Features
+
+* add reusable gitops workflows ([1a9dc45](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/1a9dc45a1d36529a4457eff4e5c9cc4d091ab196))
+* add terraform workflows ([f77bffc](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/f77bffc9f65f5f82fb4570f1c06db3a4fdfbce56))
+* add tests reusable workflows and actions ([cf8cd58](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/cf8cd586a13d524028cdf41c72c2f502ac246722))
+
 ## [1.1.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.0.0...v1.1.0) (2026-08-15)
 
 
