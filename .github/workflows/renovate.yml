@@ -1,0 +1,154 @@
+name: Renovate (Reusable)
+
+# Self-hosted Renovate run. Keeps dependency automation configuration in the
+# consumer repo (renovate.json) while the execution mechanics live here.
+#
+# Required caller permissions:
+#   contents: read
+#
+# The GITHUB_TOKEN is deliberately NOT used to drive Renovate: it cannot open
+# PRs that trigger other workflows, so the caller must supply a PAT or GitHub
+# App token via the `renovate-token` secret.
+
+on:
+  workflow_call:
+    inputs:
+      config-file:
+        description: "Repo-relative Renovate configuration file."
+        required: false
+        type: string
+        default: "renovate.json"
+      repositories:
+        description: "Space-separated repositories Renovate operates on. Defaults to the calling repository."
+        required: false
+        type: string
+        default: ""
+      log-level:
+        description: "Renovate log level: fatal | error | warn | info | debug | trace."
+        required: false
+        type: string
+        default: "info"
+      dry-run:
+        description: "Log-only run — Renovate resolves updates but writes no branches, commits or PRs."
+        required: false
+        type: boolean
+        default: false
+      git-author:
+        description: "Git author Renovate commits as."
+        required: false
+        type: string
+        default: "Renovate Bot <renovate@users.noreply.github.com>"
+      platform:
+        description: "Renovate platform: github | gitlab | bitbucket | azure."
+        required: false
+        type: string
+        default: "github"
+      host-rules:
+        description: >-
+          JSON array of Renovate hostRules for private registries. Reference the
+          token as the literal string "${RENOVATE_HOST_TOKEN}" — it is
+          substituted at runtime from the renovate-host-token secret (falling
+          back to renovate-token), so no credential is ever written into a
+          workflow file. Empty disables host rules.
+        required: false
+        type: string
+        default: ""
+      renovate-version:
+        description: "Renovate version, passed through to renovatebot/github-action's `renovate-version`. Empty uses the action's default."
+        required: false
+        type: string
+        default: ""
+      runs-on:
+        description: "Runner label for the Renovate job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout for the Renovate job."
+        required: false
+        type: number
+        default: 30
+    secrets:
+      renovate-token:
+        description: "Token Renovate authenticates to the platform with. Needs permission to create branches and pull requests. Required."
+        required: true
+      renovate-host-token:
+        description: "Optional separate token substituted into host-rules for private registry access (e.g. packages: read on GHCR). Falls back to renovate-token when unset."
+        required: false
+
+jobs:
+  renovate:
+    name: Run Renovate
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Build host rules
+        id: host-rules
+        env:
+          HOST_RULES: ${{ inputs.host-rules }}
+          RENOVATE_HOST_TOKEN: ${{ secrets.renovate-host-token || secrets.renovate-token }}
+        run: |
+          set -euo pipefail
+          if [ -z "$HOST_RULES" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! printf '%s' "$HOST_RULES" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            echo "::error title=Invalid host-rules::'host-rules' must be a JSON array"
+            exit 1
+          fi
+
+          # jq reads the token from the environment (env.*), so the credential
+          # never appears in a workflow file, in argv, or in this script's text.
+          rendered="$(printf '%s' "$HOST_RULES" | jq -c '
+            walk(if type == "string"
+                 then gsub("\\$\\{RENOVATE_HOST_TOKEN\\}"; env.RENOVATE_HOST_TOKEN // "")
+                 else . end)')"
+          {
+            echo "RENOVATE_HOST_RULES<<RENOVATE_HOST_RULES_EOF"
+            printf '%s\n' "$rendered"
+            echo "RENOVATE_HOST_RULES_EOF"
+          } >> "$GITHUB_ENV"
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Renovate::Host rules configured for $(printf '%s' "$HOST_RULES" | jq -r '[.[].matchHost] | join(", ")')"
+
+      - name: Self-hosted Renovate
+        uses: renovatebot/github-action@b50d2ba2bd928235abdcc14d06dfafc217f1c565  # v46.1.18
+        env:
+          LOG_LEVEL: ${{ inputs.log-level }}
+          RENOVATE_DRY_RUN: ${{ inputs.dry-run && 'full' || '' }}
+          RENOVATE_PLATFORM: ${{ inputs.platform }}
+          RENOVATE_REPOSITORIES: ${{ inputs.repositories || github.repository }}
+          RENOVATE_GIT_AUTHOR: ${{ inputs.git-author }}
+        with:
+          token: ${{ secrets.renovate-token }}
+          configurationFile: ${{ inputs.config-file }}
+          renovate-version: ${{ inputs.renovate-version }}
+
+      - name: Write Renovate summary
+        if: always()
+        env:
+          REPOSITORIES: ${{ inputs.repositories || github.repository }}
+          LOG_LEVEL: ${{ inputs.log-level }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          CONFIG_FILE: ${{ inputs.config-file }}
+          HOST_RULES: ${{ steps.host-rules.outputs.configured }}
+        run: |
+          {
+            echo "### Renovate"
+            echo ""
+            echo "| Setting | Value |"
+            echo "| --- | --- |"
+            echo "| Repositories | \`${REPOSITORIES}\` |"
+            echo "| Config | \`${CONFIG_FILE}\` |"
+            echo "| Log level | ${LOG_LEVEL} |"
+            echo "| Dry run | ${DRY_RUN} |"
+            echo "| Host rules | ${HOST_RULES:-false} |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -46,15 +46,28 @@ on:
         type: string
         default: ".github/workflows/"
       yamllint-config:
-        description: "Path to the yamllint config file in the caller repo."
+        description: "Path to the yamllint config file in the caller repo. Ignored when yamllint-config-data is set."
         required: false
         type: string
         default: ".yamllint.yml"
+      yamllint-config-data:
+        description: >-
+          Inline yamllint configuration (YAML). Takes precedence over
+          yamllint-config, for repos that keep the ruleset in the caller
+          workflow instead of a committed dotfile. Empty uses yamllint-config.
+        required: false
+        type: string
+        default: ""
       yamllint-version:
         description: "yamllint version installed via pipx."
         required: false
         type: string
         default: "1.35.1"
+      yamllint-strict:
+        description: "Pass --strict to yamllint: warnings are treated as errors and fail the job."
+        required: false
+        type: boolean
+        default: false
       yamllint-enforce:
         description: "When false, yamllint findings are reported but do not fail the job."
         required: false
@@ -142,12 +155,22 @@ jobs:
         env:
           YAMLLINT_VERSION: ${{ inputs.yamllint-version }}
           YAMLLINT_CONFIG: ${{ inputs.yamllint-config }}
+          YAMLLINT_CONFIG_DATA: ${{ inputs.yamllint-config-data }}
           YAMLLINT_PATHS: ${{ inputs.yamllint-paths }}
+          YAMLLINT_STRICT: ${{ inputs.yamllint-strict }}
         run: |
           set -euo pipefail
           read -ra paths <<< "$YAMLLINT_PATHS"
           args=(--format github)
-          if [ -f "$YAMLLINT_CONFIG" ]; then
+          if [ "$YAMLLINT_STRICT" = "true" ]; then
+            args+=(--strict)
+          fi
+          if [ -n "$YAMLLINT_CONFIG_DATA" ]; then
+            # Written to a file rather than passed via -d: -d only accepts a
+            # single-line config, which cannot express per-rule overrides.
+            printf '%s\n' "$YAMLLINT_CONFIG_DATA" > "${RUNNER_TEMP}/yamllint.yml"
+            args+=(-c "${RUNNER_TEMP}/yamllint.yml")
+          elif [ -f "$YAMLLINT_CONFIG" ]; then
             args+=(-c "$YAMLLINT_CONFIG")
           else
             echo "::warning title=yamllint config missing::${YAMLLINT_CONFIG} not found; falling back to yamllint's default ruleset"

@@ -1,0 +1,401 @@
+
+
+name: Kubernetes Manifest Validation (Reusable)
+
+# Renders Kustomize overlays and validates the result against the Kubernetes
+# schema: helm lint on any local charts, `kustomize build` per overlay,
+# kubeconform over the rendered output, and an optional content gate (e.g.
+# "no mutable :latest OCI references"). Publishes the rendered manifests as an
+# artifact so a downstream policy scan does not have to render them again —
+# chain it with kubernetes-policy-scan.yml via `needs:`.
+#
+# Required caller permissions:
+#   contents: read
+
+on:
+  workflow_call:
+    inputs:
+      overlay-paths:
+        description: >-
+          Newline-separated Kustomize directories to build. Globs are expanded,
+          so "kubernetes/apps/overlays/*" covers every cluster without naming
+          them. Directories without a kustomization file, or with an empty
+          placeholder one, are skipped with an annotation.
+        required: true
+        type: string
+      kubernetes-version:
+        description: 'Kubernetes API version kubeconform validates against, e.g. "1.31.0". "master" tracks the latest schema.'
+        required: false
+        type: string
+        default: "master"
+      flux-version:
+        description: 'Flux CLI version to install, without the leading "v". Empty skips it — only needed if your `extra-commands` shell out to `flux`.'
+        required: false
+        type: string
+        default: ""
+      kustomize-version:
+        description: 'Kustomize version, without the leading "v".'
+        required: false
+        type: string
+        default: "5.5.0"
+      kubeconform-version:
+        description: 'kubeconform version, without the leading "v".'
+        required: false
+        type: string
+        default: "0.6.7"
+      helm-version:
+        description: 'Helm version. Only installed when helm-lint is true or a chart-based overlay needs it.'
+        required: false
+        type: string
+        default: "3.17.0"
+      helm-lint:
+        description: "Run `helm lint` against every local chart (any directory containing a Chart.yaml) under helm-lint-path."
+        required: false
+        type: boolean
+        default: true
+      helm-lint-path:
+        description: "Root directory searched for local Helm charts."
+        required: false
+        type: string
+        default: "."
+      load-restrictor:
+        description: "Value for `kustomize build --load-restrictor`."
+        required: false
+        type: string
+        default: "LoadRestrictionsNone"
+      kustomize-args:
+        description: 'Extra arguments appended to every `kustomize build`, e.g. "--enable-helm".'
+        required: false
+        type: string
+        default: ""
+      strict:
+        description: "Pass -strict to kubeconform: reject manifests with fields not present in the schema."
+        required: false
+        type: boolean
+        default: true
+      ignore-missing-schemas:
+        description: "Pass -ignore-missing-schemas: skip CRDs with no published schema rather than failing. Turn off once you supply CRD schemas via schema-locations."
+        required: false
+        type: boolean
+        default: true
+      schema-locations:
+        description: 'Newline-separated kubeconform -schema-location values. "default" is the upstream Kubernetes schema store.'
+        required: false
+        type: string
+        default: "default"
+      skip-kinds:
+        description: 'Comma-separated kinds kubeconform skips entirely, e.g. "CustomResourceDefinition".'
+        required: false
+        type: string
+        default: ""
+      deny-pattern:
+        description: >-
+          Extended regular expression that must NOT appear anywhere under
+          deny-pattern-path. Fails the job with an annotation when it matches.
+          Typical use is banning mutable references, e.g.
+          'url:[[:space:]]*oci://.+:latest([[:space:]]|$)'. Empty disables the gate.
+        required: false
+        type: string
+        default: ""
+      deny-pattern-path:
+        description: "Directory searched by the deny-pattern gate."
+        required: false
+        type: string
+        default: "."
+      deny-pattern-title:
+        description: "Annotation title used when deny-pattern matches."
+        required: false
+        type: string
+        default: "Forbidden pattern"
+      report-pattern:
+        description: 'Informational extended regular expression: matches are logged, never fail the job. Useful for inventorying references, e.g. "url:[[:space:]]*oci://". Empty disables it.'
+        required: false
+        type: string
+        default: ""
+      report-pattern-path:
+        description: "Directory searched by the report-pattern inventory."
+        required: false
+        type: string
+        default: "."
+      report-pattern-title:
+        description: "Annotation title used for the report-pattern inventory."
+        required: false
+        type: string
+        default: "Reference inventory"
+      upload-artifact:
+        description: "Upload the rendered manifests so downstream jobs (policy scanning, drift review) can consume them without re-rendering."
+        required: false
+        type: boolean
+        default: true
+      artifact-name:
+        description: "Name of the rendered-manifests artifact."
+        required: false
+        type: string
+        default: "rendered-manifests"
+      artifact-retention-days:
+        description: "Retention period for the rendered-manifests artifact."
+        required: false
+        type: number
+        default: 7
+      output-dir:
+        description: "Directory the rendered manifests are written to."
+        required: false
+        type: string
+        default: "rendered"
+      runs-on:
+        description: "Runner label for the validation job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout for the validation job."
+        required: false
+        type: number
+        default: 20
+    outputs:
+      rendered-count:
+        description: "Number of overlays that rendered successfully."
+        value: ${{ jobs.validate.outputs.rendered-count }}
+      artifact-name:
+        description: "Name of the uploaded rendered-manifests artifact, empty when upload-artifact is false."
+        value: ${{ jobs.validate.outputs.artifact-name }}
+
+jobs:
+  validate:
+    name: Kustomize, Helm, kubeconform
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    outputs:
+      rendered-count: ${{ steps.render.outputs.rendered-count }}
+      artifact-name: ${{ steps.artifact-name.outputs.name }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Toolchain setup is inlined rather than calling actions/setup-kubernetes-tools:
+      # a relative `uses:` inside a reusable workflow resolves against the caller
+      # repo, not this one. See CONTRIBUTING.md.
+      - name: Setup Flux CLI
+        if: inputs.flux-version != ''
+        uses: fluxcd/flux2/action@1fd61a06264d71cf445ed55c4f14d401d26a1c64  # v2.8.8
+        with:
+          version: ${{ inputs.flux-version }}
+          token: ${{ github.token }}
+
+      - name: Setup Kustomize
+        uses: fluxcd/pkg/actions/kustomize@827f6c319fb09577b6243e95b6c07dffe53bb6f3
+        with:
+          version: ${{ inputs.kustomize-version }}
+
+      - name: Setup kubeconform
+        uses: fluxcd/pkg/actions/kubeconform@827f6c319fb09577b6243e95b6c07dffe53bb6f3
+        with:
+          version: ${{ inputs.kubeconform-version }}
+
+      - name: Setup Helm
+        if: inputs.helm-version != ''
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: v${{ inputs.helm-version }}
+
+      - name: Helm lint local charts
+        if: inputs.helm-lint
+        env:
+          LINT_PATH: ${{ inputs.helm-lint-path }}
+        run: |
+          set -euo pipefail
+          echo "::group::helm lint"
+          found=0
+          while IFS= read -r chart; do
+            found=1
+            echo "Linting ${chart}"
+            helm lint "$(dirname "$chart")"
+          done < <(find "$LINT_PATH" -type f -name Chart.yaml | sort)
+          if [ "$found" -eq 0 ]; then
+            echo "::notice title=helm lint::No local Helm charts found under ${LINT_PATH}"
+          fi
+          echo "::endgroup::"
+
+      - name: Build Kustomize overlays
+        id: render
+        env:
+          PATHS: ${{ inputs.overlay-paths }}
+          OUTPUT_DIR: ${{ inputs.output-dir }}
+          LOAD_RESTRICTOR: ${{ inputs.load-restrictor }}
+          KUSTOMIZE_ARGS: ${{ inputs.kustomize-args }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT_DIR"
+          read -ra extra_args <<< "$KUSTOMIZE_ARGS"
+          rendered=0
+          skipped=0
+          rows=""
+          shopt -s nullglob
+
+          echo "::group::Kustomize overlays"
+          while IFS= read -r pattern; do
+            pattern="${pattern#"${pattern%%[![:space:]]*}"}"
+            pattern="${pattern%"${pattern##*[![:space:]]}"}"
+            [ -n "$pattern" ] || continue
+
+            matched=0
+            # Unquoted on purpose: applies glob expansion to the caller pattern.
+            # shellcheck disable=SC2086
+            for dir in $pattern; do
+              matched=1
+              if [ ! -d "$dir" ]; then
+                echo "::warning title=Not a directory::${dir} is not a directory — skipping"
+                skipped=$((skipped + 1))
+                rows+="| \`${dir}\` | skipped (not a directory) |"$'\n'
+                continue
+              fi
+
+              kfile=""
+              for candidate in "${dir}/kustomization.yaml" "${dir}/kustomization.yml" "${dir}/Kustomization"; do
+                if [ -f "$candidate" ]; then kfile="$candidate"; break; fi
+              done
+
+              if [ -z "$kfile" ]; then
+                echo "::notice title=No kustomization::${dir} has no kustomization file — skipping"
+                skipped=$((skipped + 1))
+                rows+="| \`${dir}\` | skipped (no kustomization) |"$'\n'
+                continue
+              fi
+              if [ ! -s "$kfile" ]; then
+                echo "::warning file=${kfile},title=Empty kustomization::Skipping empty placeholder"
+                skipped=$((skipped + 1))
+                rows+="| \`${dir}\` | skipped (empty placeholder) |"$'\n'
+                continue
+              fi
+
+              slug="${dir#./}"; slug="${slug%/}"; slug="${slug//\//-}"
+              out="${OUTPUT_DIR}/${slug}.yaml"
+              echo "Building ${dir} -> ${out}"
+              kustomize build --load-restrictor="${LOAD_RESTRICTOR}" "${extra_args[@]}" "$dir" > "$out"
+              rendered=$((rendered + 1))
+              rows+="| \`${dir}\` | \`${out}\` |"$'\n'
+            done
+
+            if [ "$matched" -eq 0 ]; then
+              echo "::warning title=No match::Pattern '${pattern}' matched nothing"
+              rows+="| \`${pattern}\` | no match |"$'\n'
+            fi
+          done <<< "$PATHS"
+          echo "::endgroup::"
+
+          echo "rendered-count=${rendered}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Kustomize render"
+            echo ""
+            echo "| Source | Output |"
+            echo "| --- | --- |"
+            printf '%s' "$rows"
+            echo ""
+            echo "Rendered **${rendered}**, skipped **${skipped}**."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$rendered" -eq 0 ]; then
+            echo "::error title=Nothing rendered::No directory in 'overlay-paths' produced output — check the patterns"
+            exit 1
+          fi
+
+      - name: Validate with kubeconform
+        env:
+          OUTPUT_DIR: ${{ inputs.output-dir }}
+          KUBERNETES_VERSION: ${{ inputs.kubernetes-version }}
+          STRICT: ${{ inputs.strict }}
+          IGNORE_MISSING: ${{ inputs.ignore-missing-schemas }}
+          SCHEMA_LOCATIONS: ${{ inputs.schema-locations }}
+          SKIP_KINDS: ${{ inputs.skip-kinds }}
+        run: |
+          set -euo pipefail
+          args=(-kubernetes-version "$KUBERNETES_VERSION" -summary)
+          if [ "$STRICT" = "true" ]; then args+=(-strict); fi
+          if [ "$IGNORE_MISSING" = "true" ]; then args+=(-ignore-missing-schemas); fi
+          if [ -n "$SKIP_KINDS" ]; then args+=(-skip "$SKIP_KINDS"); fi
+          while IFS= read -r loc; do
+            loc="${loc#"${loc%%[![:space:]]*}"}"
+            loc="${loc%"${loc##*[![:space:]]}"}"
+            [ -n "$loc" ] || continue
+            args+=(-schema-location "$loc")
+          done <<< "$SCHEMA_LOCATIONS"
+
+          failed=0
+          echo "::group::kubeconform"
+          for file in "${OUTPUT_DIR}"/*.yaml; do
+            echo "Validating ${file}"
+            if ! kubeconform "${args[@]}" "$file"; then
+              echo "::error file=${file},title=Schema validation failed::${file} does not validate against Kubernetes ${KUBERNETES_VERSION}"
+              failed=1
+            fi
+          done
+          echo "::endgroup::"
+
+          {
+            echo "### kubeconform"
+            echo ""
+            if [ "$failed" -eq 0 ]; then
+              echo "All rendered manifests validate against Kubernetes \`${KUBERNETES_VERSION}\`. :white_check_mark:"
+            else
+              echo "Schema validation failed — see annotations above. :x:"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$failed"
+
+      - name: Reference inventory
+        if: inputs.report-pattern != ''
+        env:
+          PATTERN: ${{ inputs.report-pattern }}
+          SEARCH_PATH: ${{ inputs.report-pattern-path }}
+          TITLE: ${{ inputs.report-pattern-title }}
+        run: |
+          set -euo pipefail
+          echo "::group::${TITLE}"
+          if ! grep -RInE "$PATTERN" "$SEARCH_PATH"; then
+            echo "::notice title=${TITLE}::No matches for the reporting pattern"
+          fi
+          echo "::endgroup::"
+
+      - name: Forbidden pattern gate
+        if: inputs.deny-pattern != ''
+        env:
+          PATTERN: ${{ inputs.deny-pattern }}
+          SEARCH_PATH: ${{ inputs.deny-pattern-path }}
+          TITLE: ${{ inputs.deny-pattern-title }}
+        run: |
+          set -euo pipefail
+          echo "::group::${TITLE}"
+          if matches="$(grep -RInE "$PATTERN" "$SEARCH_PATH")"; then
+            printf '%s\n' "$matches"
+            while IFS= read -r line; do
+              file="${line%%:*}"
+              rest="${line#*:}"
+              lineno="${rest%%:*}"
+              echo "::error file=${file},line=${lineno},title=${TITLE}::Matched the forbidden pattern"
+            done <<< "$matches"
+            echo "::endgroup::"
+            exit 1
+          fi
+          echo "::notice title=${TITLE}::No forbidden matches"
+          echo "::endgroup::"
+
+      # Exposes the artifact name as a workflow output so a downstream
+      # policy-scan job can consume it without the caller repeating the string.
+      - name: Resolve artifact name
+        id: artifact-name
+        env:
+          ARTIFACT_NAME: ${{ inputs.upload-artifact && inputs.artifact-name || '' }}
+        run: echo "name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload rendered manifests
+        if: inputs.upload-artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.output-dir }}/
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact-retention-days }}

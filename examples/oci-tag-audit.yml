@@ -1,0 +1,64 @@
+name: Sync audit
+
+# Drift detector for GitOps repos: assert that every chart/image tag pinned in
+# a manifest actually exists as a published artifact, so a bad pin fails CI
+# instead of failing reconciliation on the cluster.
+#
+# Extracting the pins is repo-specific glue and stays in the caller — it depends
+# on your overlay layout. The shared action only does the registry probing.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * *"
+  pull_request:
+    paths:
+      - "kubernetes/apps/overlays/**"
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: sync-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Audit pinned tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Collect pinned tags
+        id: pins
+        run: |
+          set -euo pipefail
+          artifacts='[]'
+          add() {
+            artifacts="$(printf '%s' "$artifacts" | jq -c \
+              --arg name "$1" --arg repo "$2" --arg tag "$3" --arg file "$4" \
+              '. + [{name: $name, repository: $repo, tag: $tag, file: $file}]')"
+          }
+
+          shopt -s nullglob
+          for overlay in kubernetes/apps/overlays/*/my-app; do
+            env_name="$(basename "$(dirname "$overlay")")"
+            values="$overlay/helmrelease-images.yaml"
+            [ -f "$values" ] || continue
+            add "api [${env_name}]" "${GITHUB_REPOSITORY_OWNER}/my-api" \
+                "$(yq '.spec.values.api.image.tag' "$values")" "$values"
+          done
+
+          echo "artifacts=${artifacts}" >> "$GITHUB_OUTPUT"
+
+      - name: Audit tags against the registry
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/oci-tag-audit@v1
+        with:
+          artifacts: ${{ steps.pins.outputs.artifacts }}
+          registry: ghcr.io
+          # Omit for public artifacts — anonymous pull is used automatically.
+          password: ${{ secrets.GITHUB_TOKEN }}

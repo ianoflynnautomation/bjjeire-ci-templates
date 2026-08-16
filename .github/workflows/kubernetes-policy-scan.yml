@@ -1,0 +1,307 @@
+name: Kubernetes Policy Scan (Reusable)
+
+# Security and policy gates over a set of rendered Kubernetes manifests:
+# Trivy misconfiguration scan (table + SARIF to code scanning), Fairwinds
+# Polaris best-practice audit, and an optional hadolint pass over Dockerfiles.
+#
+# The manifests are NOT rendered here. Either chain this after
+# kubernetes-manifest-validation.yml and consume its artifact (the default), or
+# point `manifests-path` at a directory that already exists in the repo. That
+# keeps `kustomize build` running exactly once per pipeline.
+#
+# Required caller permissions:
+#   contents: read
+#   security-events: write   # only when upload-sarif: true (the default)
+
+on:
+  workflow_call:
+    inputs:
+      manifests-artifact:
+        description: >-
+          Name of the artifact holding the rendered manifests, produced earlier
+          in the same workflow run (artifacts do not cross runs — chain the jobs
+          with `needs:`). Ignored when manifests-path is set.
+        required: false
+        type: string
+        default: "rendered-manifests"
+      manifests-path:
+        description: >-
+          Repo-relative directory of manifests to scan instead of downloading an
+          artifact. Set this when the manifests are committed, or when a prior
+          job in your own caller rendered them into the workspace.
+        required: false
+        type: string
+        default: ""
+      scan-dir:
+        description: "Directory the scanners run against. The artifact is downloaded into this path when manifests-path is empty."
+        required: false
+        type: string
+        default: "rendered"
+      trivy:
+        description: "Run the Trivy misconfiguration scan."
+        required: false
+        type: boolean
+        default: true
+      trivy-image:
+        description: "Trivy container image. Pin by digest — a moving tag silently changes which rules run."
+        required: false
+        type: string
+        default: "aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e"
+      trivy-severity:
+        description: "Comma-separated severities Trivy fails on."
+        required: false
+        type: string
+        default: "HIGH,CRITICAL"
+      trivy-enforce:
+        description: "When false, Trivy findings are reported but do not fail the job."
+        required: false
+        type: boolean
+        default: true
+      trivy-args:
+        description: "Extra arguments appended to `trivy config`."
+        required: false
+        type: string
+        default: ""
+      upload-sarif:
+        description: "Upload the Trivy SARIF report to GitHub code scanning. Requires security-events: write. Automatically skipped for forked-PR runs, which cannot write to code scanning."
+        required: false
+        type: boolean
+        default: true
+      polaris:
+        description: "Run the Fairwinds Polaris best-practice audit."
+        required: false
+        type: boolean
+        default: true
+      polaris-image:
+        description: "Polaris container image, digest-pinned."
+        required: false
+        type: string
+        default: "quay.io/fairwinds/polaris:10.1.8@sha256:7af688527df75c3825395ded8aeb3775fad2027228aa06c9959d39ae6c00e999"
+      polaris-min-score:
+        description: "Fail when the Polaris score falls below this value (--set-exit-code-below-score)."
+        required: false
+        type: number
+        default: 80
+      polaris-fail-on-danger:
+        description: "Fail on any Polaris danger-level finding (--set-exit-code-on-danger)."
+        required: false
+        type: boolean
+        default: true
+      polaris-config:
+        description: "Repo-relative path to a Polaris config file. Empty uses the built-in default checks."
+        required: false
+        type: string
+        default: ""
+      polaris-enforce:
+        description: "When false, Polaris findings are reported but do not fail the job."
+        required: false
+        type: boolean
+        default: true
+      hadolint:
+        description: "Lint every discovered Dockerfile with hadolint. Auto-skips when the repo contains none."
+        required: false
+        type: boolean
+        default: true
+      hadolint-image:
+        description: "hadolint container image, digest-pinned."
+        required: false
+        type: string
+        default: "hadolint/hadolint:v2.12.0@sha256:30a8fd2e785ab6176eed53f74769e04f125afb2f74a6c52aef7d463583b6d45e"
+      hadolint-path:
+        description: "Root directory searched for Dockerfiles."
+        required: false
+        type: string
+        default: "."
+      hadolint-enforce:
+        description: "When false, hadolint findings are reported but do not fail the job."
+        required: false
+        type: boolean
+        default: true
+      runs-on:
+        description: "Runner label for the scan job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout for the scan job."
+        required: false
+        type: number
+        default: 25
+
+jobs:
+  policy-scan:
+    name: Policy and security scans
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download rendered manifests
+        if: inputs.manifests-path == ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ inputs.manifests-artifact }}
+          path: ${{ inputs.scan-dir }}
+
+      - name: Resolve scan directory
+        id: target
+        env:
+          MANIFESTS_PATH: ${{ inputs.manifests-path }}
+          SCAN_DIR: ${{ inputs.scan-dir }}
+        run: |
+          set -euo pipefail
+          dir="${MANIFESTS_PATH:-$SCAN_DIR}"
+          if [ ! -d "$dir" ]; then
+            echo "::error title=No manifests::${dir} does not exist — check manifests-artifact/manifests-path"
+            exit 1
+          fi
+          count="$(find "$dir" -type f \( -name '*.yaml' -o -name '*.yml' \) | wc -l | tr -d ' ')"
+          if [ "$count" -eq 0 ]; then
+            echo "::error title=No manifests::${dir} contains no YAML files"
+            exit 1
+          fi
+          echo "dir=${dir}" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Policy scan::Scanning ${count} manifest file(s) in ${dir}"
+
+      - name: Trivy misconfiguration scan
+        if: inputs.trivy
+        continue-on-error: ${{ !inputs.trivy-enforce }}
+        env:
+          IMAGE: ${{ inputs.trivy-image }}
+          SCAN_DIR: ${{ steps.target.outputs.dir }}
+          SEVERITY: ${{ inputs.trivy-severity }}
+          EXTRA_ARGS: ${{ inputs.trivy-args }}
+        run: |
+          set -euo pipefail
+          read -ra extra <<< "$EXTRA_ARGS"
+          echo "::group::trivy config"
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/github/workspace" \
+            -w /github/workspace \
+            "$IMAGE" config \
+              --skip-version-check \
+              --exit-code 1 \
+              --severity "$SEVERITY" \
+              --format table \
+              "${extra[@]}" \
+              "$SCAN_DIR"
+          echo "::endgroup::"
+
+      - name: Trivy SARIF report
+        # always(), not success(): findings that fail the gate above are exactly
+        # the ones worth having in code scanning. Guarded on the resolved
+        # directory so it is skipped when there was nothing to scan.
+        if: ${{ always() && inputs.trivy && inputs.upload-sarif && steps.target.outputs.dir != '' }}
+        env:
+          IMAGE: ${{ inputs.trivy-image }}
+          SCAN_DIR: ${{ steps.target.outputs.dir }}
+          SEVERITY: ${{ inputs.trivy-severity }}
+        run: |
+          set -euo pipefail
+          # --exit-code 0: this pass only produces the report; the gating
+          # decision was already made by the step above.
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/github/workspace" \
+            -w /github/workspace \
+            "$IMAGE" config \
+              --skip-version-check \
+              --exit-code 0 \
+              --severity "$SEVERITY" \
+              --format sarif \
+              --output trivy-results.sarif \
+              "$SCAN_DIR"
+
+      - name: Upload Trivy SARIF
+        # Forked-PR runs get a read-only token and cannot write code scanning
+        # results; uploading would fail the job on every external contribution.
+        if: >-
+          always() &&
+          inputs.trivy && inputs.upload-sarif &&
+          hashFiles('trivy-results.sarif') != '' &&
+          (github.event_name != 'pull_request' ||
+           github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Polaris policy audit
+        if: inputs.polaris
+        continue-on-error: ${{ !inputs.polaris-enforce }}
+        env:
+          IMAGE: ${{ inputs.polaris-image }}
+          SCAN_DIR: ${{ steps.target.outputs.dir }}
+          MIN_SCORE: ${{ inputs.polaris-min-score }}
+          FAIL_ON_DANGER: ${{ inputs.polaris-fail-on-danger }}
+          CONFIG: ${{ inputs.polaris-config }}
+        run: |
+          set -euo pipefail
+          args=(polaris audit --audit-path "$SCAN_DIR" --format pretty
+                --set-exit-code-below-score "$MIN_SCORE")
+          if [ "$FAIL_ON_DANGER" = "true" ]; then args+=(--set-exit-code-on-danger); fi
+          if [ -n "$CONFIG" ]; then args+=(--config "$CONFIG"); fi
+
+          echo "::group::polaris audit"
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/github/workspace" \
+            -w /github/workspace \
+            "$IMAGE" "${args[@]}"
+          echo "::endgroup::"
+
+      - name: Discover Dockerfiles
+        id: dockerfiles
+        if: inputs.hadolint
+        env:
+          SEARCH_PATH: ${{ inputs.hadolint-path }}
+        run: |
+          set -euo pipefail
+          files="$(find "$SEARCH_PATH" -type f \( -iname Dockerfile -o -iname '*.Dockerfile' \) -print | sort | tr '\n' ' ')"
+          echo "files=${files}" >> "$GITHUB_OUTPUT"
+          if [ -z "$files" ]; then
+            echo "::notice title=hadolint::No Dockerfiles found under ${SEARCH_PATH}"
+          fi
+
+      - name: Hadolint Dockerfiles
+        if: ${{ inputs.hadolint && steps.dockerfiles.outputs.files != '' }}
+        continue-on-error: ${{ !inputs.hadolint-enforce }}
+        env:
+          IMAGE: ${{ inputs.hadolint-image }}
+          FILES: ${{ steps.dockerfiles.outputs.files }}
+        run: |
+          set -euo pipefail
+          read -ra files <<< "$FILES"
+          echo "::group::hadolint"
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/github/workspace" \
+            -w /github/workspace \
+            "$IMAGE" "${files[@]}"
+          echo "::endgroup::"
+
+      - name: Write scan summary
+        if: always()
+        env:
+          SCAN_DIR: ${{ steps.target.outputs.dir }}
+          TRIVY: ${{ inputs.trivy }}
+          TRIVY_ENFORCE: ${{ inputs.trivy-enforce }}
+          TRIVY_SEVERITY: ${{ inputs.trivy-severity }}
+          POLARIS: ${{ inputs.polaris }}
+          POLARIS_ENFORCE: ${{ inputs.polaris-enforce }}
+          POLARIS_MIN_SCORE: ${{ inputs.polaris-min-score }}
+          HADOLINT: ${{ inputs.hadolint }}
+          HADOLINT_FILES: ${{ steps.dockerfiles.outputs.files }}
+        run: |
+          {
+            echo "### Kubernetes policy scan"
+            echo ""
+            echo "Scanned \`${SCAN_DIR}\`"
+            echo ""
+            echo "| Scanner | Enabled | Gate |"
+            echo "| --- | --- | --- |"
+            echo "| Trivy (config) | ${TRIVY} | severity ${TRIVY_SEVERITY}, enforce=${TRIVY_ENFORCE} |"
+            echo "| Polaris | ${POLARIS} | min score ${POLARIS_MIN_SCORE}, enforce=${POLARIS_ENFORCE} |"
+            echo "| hadolint | ${HADOLINT} | ${HADOLINT_FILES:-no Dockerfiles} |"
+          } >> "$GITHUB_STEP_SUMMARY"

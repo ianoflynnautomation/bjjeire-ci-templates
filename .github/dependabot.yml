@@ -61,3 +61,15 @@ updates:
     directory: "/actions/playwright-plan-matrix"
     schedule:
       interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/setup-kubernetes-tools"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/kustomize-render"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/oci-tag-audit"
+    schedule:
+      interval: weekly

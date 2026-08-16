@@ -1,0 +1,291 @@
+name: Flux Local (Reusable)
+
+# Offline verification of a Flux GitOps repository with allenporter/flux-local:
+#   - `test` builds every cluster path and fails on an invalid Kustomization/HelmRelease
+#   - `diff` renders the PR against the base branch and posts the delta as a
+#     sticky PR comment, so reviewers see the cluster impact of a manifest change
+#
+# Both jobs run flux-local in its own container, so no host toolchain is needed.
+#
+# Required caller permissions:
+#   contents: read
+#   pull-requests: write   # only when comment-on-pr: true (the default)
+
+on:
+  workflow_call:
+    inputs:
+      cluster-paths:
+        description: >-
+          JSON array of repo-relative Flux cluster entrypoint directories to
+          check, one matrix leg each, e.g.
+          '["kubernetes/clusters/dev","kubernetes/clusters/prod"]'.
+        required: true
+        type: string
+      test:
+        description: "Run the `flux-local test` job."
+        required: false
+        type: boolean
+        default: true
+      diff:
+        description: "Run the `flux-local diff` job. Only meaningful on pull_request events — it needs a base branch to compare against."
+        required: false
+        type: boolean
+        default: true
+      diff-resources:
+        description: 'JSON array of resource kinds to diff, e.g. ''["kustomization","helmrelease"]''.'
+        required: false
+        type: string
+        default: '["kustomization"]'
+      flux-local-image:
+        description: "flux-local container image. Pin by digest — a moving tag silently changes your validation rules."
+        required: false
+        type: string
+        default: "ghcr.io/allenporter/flux-local:v8.2.0@sha256:9c77739d8d7c71b808311693ea52d603d1ddb5190d3d4f23e47f6f33d5254602"
+      sources:
+        description: 'flux-local --sources mapping, e.g. "flux-system=." to resolve the GitRepository named flux-system to this checkout.'
+        required: false
+        type: string
+        default: "flux-system=."
+      all-namespaces:
+        description: "Pass --all-namespaces to flux-local."
+        required: false
+        type: boolean
+        default: true
+      skip-invalid-kustomization-paths:
+        description: "Pass --skip-invalid-kustomization-paths, tolerating Kustomizations whose path is not present in this repo (e.g. sourced from another GitRepository)."
+        required: false
+        type: boolean
+        default: true
+      flux-version:
+        description: >-
+          Flux CLI version installed on the host, without the leading "v".
+          Empty (the default) skips the install: flux-local ships its own
+          toolchain inside the container and never sees host binaries. Set it
+          only if you add custom steps that shell out to `flux`.
+        required: false
+        type: string
+        default: ""
+      test-args:
+        description: "Extra arguments appended to `flux-local test`."
+        required: false
+        type: string
+        default: ""
+      diff-args:
+        description: "Extra arguments appended to `flux-local diff`."
+        required: false
+        type: string
+        default: ""
+      diff-unified:
+        description: "Lines of context in the rendered diff (--unified)."
+        required: false
+        type: number
+        default: 6
+      diff-strip-attrs:
+        description: "Comma-separated metadata attributes stripped before diffing, so chart version churn does not swamp the real delta."
+        required: false
+        type: string
+        default: "helm.sh/chart,checksum/config,app.kubernetes.io/version,chart"
+      diff-limit-bytes:
+        description: "Maximum diff size emitted per matrix leg (--limit-bytes). Keeps PR comments under GitHub's 65536-character body limit."
+        required: false
+        type: number
+        default: 10000
+      comment-on-pr:
+        description: "Post the diff as a sticky PR comment, updated in place on each push. Requires pull-requests: write."
+        required: false
+        type: boolean
+        default: true
+      comment-header-prefix:
+        description: "Prefix for the sticky comment header. One comment is kept per prefix + cluster + resource, so reruns edit rather than append."
+        required: false
+        type: string
+        default: "flux-local"
+      fail-fast:
+        description: "Cancel the remaining matrix legs when one cluster fails."
+        required: false
+        type: boolean
+        default: false
+      runs-on:
+        description: "Runner label for both jobs."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      test-timeout-minutes:
+        description: "Timeout for each `test` matrix leg."
+        required: false
+        type: number
+        default: 15
+      diff-timeout-minutes:
+        description: "Timeout for each `diff` matrix leg."
+        required: false
+        type: number
+        default: 10
+
+jobs:
+  test:
+    name: Test ${{ matrix.cluster }}
+    if: inputs.test
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.test-timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: ${{ inputs.fail-fast }}
+      matrix:
+        cluster: ${{ fromJSON(inputs.cluster-paths) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Flux CLI
+        if: inputs.flux-version != ''
+        uses: fluxcd/flux2/action@1fd61a06264d71cf445ed55c4f14d401d26a1c64  # v2.8.8
+        with:
+          version: ${{ inputs.flux-version }}
+          token: ${{ github.token }}
+
+      - name: Run flux-local test
+        env:
+          IMAGE: ${{ inputs.flux-local-image }}
+          CLUSTER_PATH: ${{ matrix.cluster }}
+          SOURCES: ${{ inputs.sources }}
+          ALL_NAMESPACES: ${{ inputs.all-namespaces }}
+          SKIP_INVALID: ${{ inputs.skip-invalid-kustomization-paths }}
+          EXTRA_ARGS: ${{ inputs.test-args }}
+        run: |
+          set -euo pipefail
+          args=(test --path "/github/workspace/${CLUSTER_PATH}" --sources "$SOURCES" --verbose)
+          if [ "$ALL_NAMESPACES" = "true" ]; then args+=(--all-namespaces); fi
+          if [ "$SKIP_INVALID" = "true" ]; then args+=(--skip-invalid-kustomization-paths); fi
+          read -ra extra <<< "$EXTRA_ARGS"
+          args+=("${extra[@]}")
+
+          # Mount at /github/workspace so the --path arguments match the
+          # container-action convention the flux-local docs use.
+          echo "::group::flux-local test ${CLUSTER_PATH}"
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/github/workspace" \
+            -w /github/workspace \
+            "$IMAGE" "${args[@]}"
+          echo "::endgroup::"
+          echo "::notice title=flux-local test::${CLUSTER_PATH} built cleanly"
+
+  diff:
+    name: Diff ${{ matrix.cluster }} (${{ matrix.resource }})
+    if: inputs.diff && github.event_name == 'pull_request'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.diff-timeout-minutes }}
+    permissions:
+      contents: read
+      pull-requests: write
+    strategy:
+      fail-fast: ${{ inputs.fail-fast }}
+      matrix:
+        cluster: ${{ fromJSON(inputs.cluster-paths) }}
+        resource: ${{ fromJSON(inputs.diff-resources) }}
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: pull
+          persist-credentials: false
+
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ github.base_ref }}
+          path: default
+          persist-credentials: false
+
+      - name: Setup Flux CLI
+        if: inputs.flux-version != ''
+        uses: fluxcd/flux2/action@1fd61a06264d71cf445ed55c4f14d401d26a1c64  # v2.8.8
+        with:
+          version: ${{ inputs.flux-version }}
+          token: ${{ github.token }}
+
+      - name: Run flux-local diff
+        env:
+          IMAGE: ${{ inputs.flux-local-image }}
+          CLUSTER_PATH: ${{ matrix.cluster }}
+          RESOURCE: ${{ matrix.resource }}
+          SOURCES: ${{ inputs.sources }}
+          UNIFIED: ${{ inputs.diff-unified }}
+          STRIP_ATTRS: ${{ inputs.diff-strip-attrs }}
+          LIMIT_BYTES: ${{ inputs.diff-limit-bytes }}
+          ALL_NAMESPACES: ${{ inputs.all-namespaces }}
+          SKIP_INVALID: ${{ inputs.skip-invalid-kustomization-paths }}
+          EXTRA_ARGS: ${{ inputs.diff-args }}
+        run: |
+          set -euo pipefail
+          args=(diff "$RESOURCE"
+                --unified "$UNIFIED"
+                --path "/github/workspace/pull/${CLUSTER_PATH}"
+                --path-orig "/github/workspace/default/${CLUSTER_PATH}"
+                --strip-attrs "$STRIP_ATTRS"
+                --limit-bytes "$LIMIT_BYTES"
+                --sources "$SOURCES"
+                --output-file diff.patch)
+          if [ "$ALL_NAMESPACES" = "true" ]; then args+=(--all-namespaces); fi
+          if [ "$SKIP_INVALID" = "true" ]; then args+=(--skip-invalid-kustomization-paths); fi
+          read -ra extra <<< "$EXTRA_ARGS"
+          args+=("${extra[@]}")
+
+          echo "::group::flux-local diff ${RESOURCE} ${CLUSTER_PATH}"
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/github/workspace" \
+            -w /github/workspace \
+            "$IMAGE" "${args[@]}"
+          echo "::endgroup::"
+
+      - name: Read diff
+        id: diff
+        env:
+          CLUSTER_PATH: ${{ matrix.cluster }}
+          RESOURCE: ${{ matrix.resource }}
+        run: |
+          set -euo pipefail
+          # Random delimiter: a fixed "EOF" would let rendered manifest content
+          # that happens to contain the delimiter break out of the heredoc and
+          # forge additional step outputs.
+          delim="EOF_$(openssl rand -hex 16)"
+          {
+            echo "diff<<${delim}"
+            cat diff.patch 2>/dev/null || true
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ -s diff.patch ]; then
+            echo "has-diff=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=flux-local diff::${CLUSTER_PATH} (${RESOURCE}) has changes"
+          else
+            echo "has-diff=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment diff on PR
+        if: ${{ inputs.comment-on-pr && steps.diff.outputs.has-diff == 'true' }}
+        continue-on-error: true
+        uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405  # v2.9.4
+        with:
+          GITHUB_TOKEN: ${{ github.token }}
+          header: ${{ inputs.comment-header-prefix }}/${{ matrix.cluster }}/${{ matrix.resource }}
+          message: |
+            ```diff
+            ${{ steps.diff.outputs.diff }}
+            ```
+
+      - name: Write diff summary
+        if: always()
+        env:
+          CLUSTER_PATH: ${{ matrix.cluster }}
+          RESOURCE: ${{ matrix.resource }}
+          HAS_DIFF: ${{ steps.diff.outputs.has-diff }}
+        run: |
+          {
+            echo "### flux-local diff"
+            echo ""
+            echo "| Cluster | Resource | Changed |"
+            echo "| --- | --- | --- |"
+            echo "| \`${CLUSTER_PATH}\` | ${RESOURCE} | ${HAS_DIFF:-unknown} |"
+          } >> "$GITHUB_STEP_SUMMARY"

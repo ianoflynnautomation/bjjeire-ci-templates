@@ -1,0 +1,115 @@
+name: 'Setup Kubernetes Tools'
+description: 'Installs the Kubernetes manifest toolchain (Flux CLI, Kustomize, kubeconform, Helm) on the host runner. Every tool is opt-in via its version input — leave a version empty to skip that tool entirely, so a job only pays for what it uses.'
+
+inputs:
+  flux-version:
+    description: 'Flux CLI version to install, without the leading "v" (e.g. "2.8.8"). Empty skips the install.'
+    required: false
+    default: ''
+  kustomize-version:
+    description: 'Kustomize version to install, without the leading "v" (e.g. "5.5.0"). Empty skips the install.'
+    required: false
+    default: ''
+  kubeconform-version:
+    description: 'kubeconform version to install, without the leading "v" (e.g. "0.6.7"). Empty skips the install.'
+    required: false
+    default: ''
+  helm-version:
+    description: 'Helm version to install (e.g. "3.17.0" or "v3.17.0" — the leading "v" is added if missing). Empty skips the install.'
+    required: false
+    default: ''
+  token:
+    description: 'Token used by the Flux CLI installer to query GitHub releases without hitting anonymous rate limits. Needs contents: read.'
+    required: false
+    default: ${{ github.token }}
+  summary-title:
+    description: 'Heading used in the step summary. Set to an empty string to skip the summary.'
+    required: false
+    default: 'Kubernetes toolchain'
+
+outputs:
+  installed:
+    description: 'JSON object of the tools that were installed and the version requested for each, e.g. {"kustomize":"5.5.0"}.'
+    value: ${{ steps.report.outputs.installed }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Normalize tool versions
+      id: normalize
+      shell: bash
+      env:
+        HELM_VERSION: ${{ inputs.helm-version }}
+      run: |
+        set -euo pipefail
+        # azure/setup-helm requires the leading "v"; every other installer here
+        # rejects it. Accept both spellings from callers and fix it up once.
+        helm="${HELM_VERSION}"
+        if [ -n "$helm" ] && [ "${helm#v}" = "$helm" ]; then
+          helm="v${helm}"
+        fi
+        echo "helm-version=${helm}" >> "$GITHUB_OUTPUT"
+
+    - name: Setup Flux CLI
+      if: inputs.flux-version != ''
+      uses: fluxcd/flux2/action@1fd61a06264d71cf445ed55c4f14d401d26a1c64  # v2.8.8
+      with:
+        version: ${{ inputs.flux-version }}
+        token: ${{ inputs.token }}
+
+    - name: Setup Kustomize
+      if: inputs.kustomize-version != ''
+      uses: fluxcd/pkg/actions/kustomize@827f6c319fb09577b6243e95b6c07dffe53bb6f3
+      with:
+        version: ${{ inputs.kustomize-version }}
+
+    - name: Setup kubeconform
+      if: inputs.kubeconform-version != ''
+      uses: fluxcd/pkg/actions/kubeconform@827f6c319fb09577b6243e95b6c07dffe53bb6f3
+      with:
+        version: ${{ inputs.kubeconform-version }}
+
+    - name: Setup Helm
+      if: inputs.helm-version != ''
+      uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+      with:
+        version: ${{ steps.normalize.outputs.helm-version }}
+
+    - name: Report installed toolchain
+      id: report
+      shell: bash
+      env:
+        FLUX_VERSION: ${{ inputs.flux-version }}
+        KUSTOMIZE_VERSION: ${{ inputs.kustomize-version }}
+        KUBECONFORM_VERSION: ${{ inputs.kubeconform-version }}
+        HELM_VERSION: ${{ steps.normalize.outputs.helm-version }}
+        SUMMARY_TITLE: ${{ inputs.summary-title }}
+      run: |
+        set -euo pipefail
+        installed="$(jq -nc \
+          --arg flux "$FLUX_VERSION" \
+          --arg kustomize "$KUSTOMIZE_VERSION" \
+          --arg kubeconform "$KUBECONFORM_VERSION" \
+          --arg helm "$HELM_VERSION" \
+          '{flux: $flux, kustomize: $kustomize, kubeconform: $kubeconform, helm: $helm}
+             | with_entries(select(.value != ""))')"
+        echo "installed=${installed}" >> "$GITHUB_OUTPUT"
+
+        echo "::group::Installed toolchain"
+        # `|| true` so a smoke check never fails the job — the installer steps
+        # above already fail loudly if a tool could not be installed.
+        if command -v flux        >/dev/null 2>&1; then flux version --client || true; fi
+        if command -v kustomize   >/dev/null 2>&1; then kustomize version     || true; fi
+        if command -v kubeconform >/dev/null 2>&1; then kubeconform -v        || true; fi
+        if command -v helm        >/dev/null 2>&1; then helm version --short  || true; fi
+        echo "::endgroup::"
+
+        if [ -n "$SUMMARY_TITLE" ]; then
+          {
+            echo "### ${SUMMARY_TITLE}"
+            echo ""
+            echo "| Tool | Version |"
+            echo "| --- | --- |"
+            echo "$installed" | jq -r 'to_entries[] | "| \(.key) | `\(.value)` |"'
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi

@@ -1,0 +1,51 @@
+name: Renovate
+
+on:
+  schedule:
+    - cron: "15 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      log_level:
+        description: Renovate log level
+        required: false
+        default: info
+        type: choice
+        options: [info, debug, warn]
+      dry_run:
+        description: Log-only dry run (no PR/commit writes)
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renovate-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  renovate:
+    name: Renovate
+    permissions:
+      contents: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/renovate.yml@v1
+    with:
+      config-file: renovate.json
+      log-level: ${{ inputs.log_level || 'info' }}
+      dry-run: ${{ inputs.dry_run || false }}
+      # ${RENOVATE_HOST_TOKEN} is substituted at runtime from the secret below.
+      # Never write a credential into this file.
+      host-rules: |
+        [
+          {
+            "matchHost": "ghcr.io",
+            "hostType": "docker",
+            "username": "x-access-token",
+            "password": "${RENOVATE_HOST_TOKEN}"
+          }
+        ]
+    secrets:
+      # A PAT or GitHub App token — GITHUB_TOKEN cannot open PRs that trigger
+      # other workflows, so Renovate PRs would never run CI.
+      renovate-token: ${{ secrets.RENOVATE_TOKEN }}

@@ -1,0 +1,31 @@
+name: Flux Local
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "kubernetes/**"
+      - ".github/workflows/flux-local.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flux-local:
+    name: Flux Local
+    permissions:
+      contents: read
+      pull-requests: write # sticky diff comment; drop it with comment-on-pr: false
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/flux-local.yml@v1
+    with:
+      # One matrix leg per cluster entrypoint.
+      cluster-paths: >-
+        ["kubernetes/clusters/dev",
+         "kubernetes/clusters/prod"]
+      # Diff HelmReleases as well as Kustomizations.
+      diff-resources: '["kustomization","helmrelease"]'

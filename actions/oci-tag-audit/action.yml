@@ -1,0 +1,185 @@
+name: 'OCI Tag Audit'
+description: 'Asserts that a caller-supplied list of registry artifacts (repository + tag) actually exists in an OCI registry, so a manifest pinned to a tag that was never published fails CI instead of failing a deployment. Works against any Docker Registry v2 API (GHCR, Docker Hub, ACR, ECR, Quay) via the standard token challenge. Extracting the pins from your manifests is caller glue — this action only verifies them.'
+
+inputs:
+  artifacts:
+    description: >-
+      JSON array of the artifacts to verify. Each entry is an object with
+      `repository` (path within the registry, e.g. "my-org/my-chart") and `tag`,
+      plus optional `name` (label used in annotations, defaults to the
+      repository) and `file` (source file, attached to annotations so the
+      failure points at the manifest that holds the bad pin). An entry with an
+      empty or null `tag` is reported as an unresolved pin, not a failure.
+    required: true
+  registry:
+    description: 'Registry host to query, e.g. "ghcr.io", "docker.io", "myregistry.azurecr.io".'
+    required: false
+    default: 'ghcr.io'
+  username:
+    description: 'Username for registry authentication. For GHCR with a GITHUB_TOKEN any value works; the actor is a sensible default.'
+    required: false
+    default: ${{ github.actor }}
+  password:
+    description: 'Password or token for registry authentication. Leave empty for anonymous pulls of public artifacts. For GHCR pass a token with packages: read.'
+    required: false
+    default: ''
+  fail-on-missing:
+    description: 'When "true", the action fails if any artifact is absent. Set "false" to report drift without blocking.'
+    required: false
+    default: 'true'
+  summary-title:
+    description: 'Heading used in the step summary. Set to an empty string to skip the summary.'
+    required: false
+    default: 'OCI tag audit'
+
+outputs:
+  checked-count:
+    description: 'Number of artifacts whose tag was resolved and probed.'
+    value: ${{ steps.audit.outputs.checked-count }}
+  missing-count:
+    description: 'Number of artifacts that could not be found in the registry.'
+    value: ${{ steps.audit.outputs.missing-count }}
+  missing:
+    description: 'JSON array of the artifact references that were absent, e.g. ["ghcr.io/my-org/my-chart:0.1.11"].'
+    value: ${{ steps.audit.outputs.missing }}
+  unresolved-count:
+    description: 'Number of entries whose tag was empty or null, i.e. a pin the caller could not extract.'
+    value: ${{ steps.audit.outputs.unresolved-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Audit registry tags
+      id: audit
+      shell: bash
+      env:
+        ARTIFACTS: ${{ inputs.artifacts }}
+        REGISTRY: ${{ inputs.registry }}
+        REGISTRY_USERNAME: ${{ inputs.username }}
+        REGISTRY_PASSWORD: ${{ inputs.password }}
+        FAIL_ON_MISSING: ${{ inputs.fail-on-missing }}
+        SUMMARY_TITLE: ${{ inputs.summary-title }}
+      run: |
+        set -euo pipefail
+
+        if ! printf '%s' "$ARTIFACTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+          echo "::error title=Invalid input::'artifacts' must be a JSON array of objects"
+          exit 1
+        fi
+
+        # Credentials never reach argv: the basic header is derived through a
+        # pipe, and only the derived value is passed to curl.
+        auth_basic=""
+        if [ -n "$REGISTRY_PASSWORD" ]; then
+          auth_basic="$(printf '%s:%s' "$REGISTRY_USERNAME" "$REGISTRY_PASSWORD" | base64 | tr -d '\n')"
+        fi
+
+        # Standard Docker Registry v2 token challenge — discover the auth realm
+        # once, then mint a per-repository pull token.
+        challenge="$(curl -sS -o /dev/null -D - "https://${REGISTRY}/v2/" 2>/dev/null | tr -d '\r' || true)"
+        realm="$(printf '%s' "$challenge"   | sed -n 's/^[Ww][Ww][Ww]-[Aa]uthenticate:.*realm="\([^"]*\)".*/\1/p'   | head -1)"
+        service="$(printf '%s' "$challenge" | sed -n 's/^[Ww][Ww][Ww]-[Aa]uthenticate:.*service="\([^"]*\)".*/\1/p' | head -1)"
+
+        # Registries accept a comma-separated Accept list; one header keeps the
+        # request identical across GHCR, Docker Hub and ACR.
+        accept='application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json'
+
+        repo_token() {
+          local repo="$1" url token_url
+          [ -n "$realm" ] || return 0
+          url="${realm}?scope=repository:${repo}:pull"
+          if [ -n "$service" ]; then
+            url="${url}&service=${service}"
+          fi
+          if [ -n "$auth_basic" ]; then
+            token_url="$(curl -fsSL -H "Authorization: Basic ${auth_basic}" "$url" 2>/dev/null || true)"
+          else
+            token_url="$(curl -fsSL "$url" 2>/dev/null || true)"
+          fi
+          printf '%s' "$token_url" | jq -r '.token // .access_token // empty' 2>/dev/null || true
+        }
+
+        checked=0
+        missing_count=0
+        unresolved=0
+        probe_errors=0
+        missing_json="[]"
+        rows=""
+
+        echo "::group::Registry probes"
+        # Fields are joined with US (0x1f), not a tab: tab is IFS whitespace, so
+        # `read` would collapse the empty field of an entry with no tag and
+        # shift every later column.
+        while IFS=$'\x1f' read -r name repo tag file; do
+          [ -n "$repo" ] || continue
+          ref="${REGISTRY}/${repo}:${tag}"
+          loc=""
+          if [ -n "$file" ]; then
+            loc="file=${file},"
+          fi
+
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "::warning ${loc}title=Unresolved pin::[${name}] no tag could be read${file:+ from ${file}}"
+            unresolved=$((unresolved + 1))
+            rows+="| ${name} | _unresolved_ | :grey_question: |"$'\n'
+            continue
+          fi
+
+          tok="$(repo_token "$repo")"
+          headers=(-H "Accept: ${accept}")
+          if [ -n "$tok" ]; then
+            headers+=(-H "Authorization: Bearer ${tok}")
+          elif [ -n "$auth_basic" ]; then
+            headers+=(-H "Authorization: Basic ${auth_basic}")
+          fi
+
+          # HEAD the manifest rather than listing tags: one request, no
+          # pagination, and it works on registries that hide /tags/list.
+          code="$(curl -sS -o /dev/null -w '%{http_code}' -I "${headers[@]}" \
+            "https://${REGISTRY}/v2/${repo}/manifests/${tag}" 2>/dev/null || echo "000")"
+          checked=$((checked + 1))
+
+          case "$code" in
+            200)
+              echo "::notice title=Present::[${name}] ${ref}"
+              rows+="| ${name} | \`${ref}\` | :white_check_mark: |"$'\n'
+              ;;
+            404)
+              echo "::error ${loc}title=Drift::[${name}] ${ref} is NOT published in ${REGISTRY}"
+              missing_count=$((missing_count + 1))
+              missing_json="$(printf '%s' "$missing_json" | jq -c --arg r "$ref" '. + [$r]')"
+              rows+="| ${name} | \`${ref}\` | :x: missing |"$'\n'
+              ;;
+            *)
+              # Fail closed: an auth or transport error is not evidence of
+              # presence, and silently passing would defeat the audit.
+              echo "::error ${loc}title=Probe failed::[${name}] ${ref} returned HTTP ${code} — cannot confirm the artifact exists"
+              probe_errors=$((probe_errors + 1))
+              rows+="| ${name} | \`${ref}\` | :warning: HTTP ${code} |"$'\n'
+              ;;
+          esac
+        done < <(printf '%s' "$ARTIFACTS" \
+          | jq -r '.[] | [ (.name // .repository // ""), (.repository // ""), (.tag // ""), (.file // "") ]
+                       | map(tostring) | join("\u001f")')
+        echo "::endgroup::"
+
+        echo "checked-count=${checked}" >> "$GITHUB_OUTPUT"
+        echo "missing-count=${missing_count}" >> "$GITHUB_OUTPUT"
+        echo "missing=${missing_json}" >> "$GITHUB_OUTPUT"
+        echo "unresolved-count=${unresolved}" >> "$GITHUB_OUTPUT"
+
+        if [ -n "$SUMMARY_TITLE" ]; then
+          {
+            echo "### ${SUMMARY_TITLE}"
+            echo ""
+            echo "| Artifact | Reference | Status |"
+            echo "| --- | --- | --- |"
+            printf '%s' "$rows"
+            echo ""
+            echo "Checked **${checked}** · missing **${missing_count}** · probe errors **${probe_errors}** · unresolved pins **${unresolved}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        if [ "$FAIL_ON_MISSING" = "true" ] && [ $((missing_count + probe_errors)) -gt 0 ]; then
+          exit 1
+        fi

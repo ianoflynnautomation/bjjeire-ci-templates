@@ -1,0 +1,58 @@
+name: Kubernetes Manifests
+
+# Golden path for a Kustomize/Flux repo: render + schema-validate once, then
+# reuse the rendered artifact for policy scanning. `kustomize build` runs once
+# per pipeline, not once per scanner.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "kubernetes/**"
+      - ".github/workflows/kubernetes-manifests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "kubernetes/**"
+  schedule:
+    - cron: "17 4 * * 1" # weekly re-scan: new CVEs land against unchanged manifests
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate
+    permissions:
+      contents: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/kubernetes-manifest-validation.yml@v1
+    with:
+      # Globs expand at render time — adding a cluster needs no CI change.
+      overlay-paths: |
+        kubernetes/apps/overlays/*
+        kubernetes/infrastructure/overlays/*
+      kubernetes-version: "1.31.0"
+      helm-lint-path: kubernetes
+      # Flux OCI Helm sources must be pinned to an immutable chart version.
+      deny-pattern: 'url:[[:space:]]*oci://.+:latest([[:space:]]|$)'
+      deny-pattern-path: kubernetes
+      deny-pattern-title: Mutable OCI reference
+
+  scan:
+    name: Policy scan
+    needs: validate
+    permissions:
+      contents: read
+      security-events: write # Trivy SARIF -> code scanning
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/kubernetes-policy-scan.yml@v1
+    with:
+      # Artifacts do not cross workflow runs — this only works because the two
+      # jobs are chained with `needs:` inside one run.
+      manifests-artifact: ${{ needs.validate.outputs.artifact-name }}
+      trivy-severity: HIGH,CRITICAL
+      polaris-min-score: 80
