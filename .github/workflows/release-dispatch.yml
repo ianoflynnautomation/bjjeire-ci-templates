@@ -1,0 +1,117 @@
+name: Release Dispatch (Reusable)
+
+# Fires a workflow_dispatch once per released package, driven by the
+# `tags-released` output of release-please.yml. This is how a chart/package
+# monorepo publishes only the components that actually released.
+#
+# It is a separate workflow from release-please.yml on purpose: dispatching
+# needs `actions: write`, and `permissions:` cannot take an expression. Folding
+# this job into release-please.yml would force every single-package consumer to
+# grant `actions: write` for a job that never runs — GitHub validates the
+# caller's permission superset at parse time, including for skipped jobs.
+#
+# Required caller permissions:
+#   actions: write
+
+on:
+  workflow_call:
+    inputs:
+      tags-released:
+        description: >-
+          JSON object mapping each released path to its tag, e.g.
+          {"charts/api":"api-v1.2.3"}. Pass release-please.yml's `tags-released`
+          output straight through. An empty object dispatches nothing.
+        required: true
+        type: string
+      workflow:
+        description: 'Workflow file name to trigger, e.g. "publish-chart.yml". It must declare workflow_dispatch and the input named by tag-input-name.'
+        required: true
+        type: string
+      tag-input-name:
+        description: "Name of the workflow_dispatch input the released tag is passed as."
+        required: false
+        type: string
+        default: "tag"
+      path-input-name:
+        description: "Optional second workflow_dispatch input carrying the released path (e.g. the chart directory). Empty passes only the tag."
+        required: false
+        type: string
+        default: ""
+      ref:
+        description: "Ref the dispatched workflow runs from. Empty uses the repository default branch."
+        required: false
+        type: string
+        default: ""
+      runs-on:
+        description: "Runner label for the dispatch job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout for the dispatch job."
+        required: false
+        type: number
+        default: 10
+    secrets:
+      dispatch-token:
+        description: "Token used for `gh workflow run`. Defaults to the caller's GITHUB_TOKEN, which is sufficient: workflow_dispatch fires normally when triggered by GITHUB_TOKEN."
+        required: false
+    outputs:
+      dispatched-count:
+        description: "Number of workflow_dispatch events fired."
+        value: ${{ jobs.dispatch.outputs.dispatched-count }}
+
+jobs:
+  dispatch:
+    name: Dispatch downstream workflow
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      actions: write
+    outputs:
+      dispatched-count: ${{ steps.dispatch.outputs.dispatched-count }}
+    steps:
+      - name: Dispatch once per released path
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ secrets.dispatch-token || github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAGS_RELEASED: ${{ inputs.tags-released }}
+          WORKFLOW: ${{ inputs.workflow }}
+          TAG_INPUT: ${{ inputs.tag-input-name }}
+          PATH_INPUT: ${{ inputs.path-input-name }}
+          DISPATCH_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "$TAGS_RELEASED" | jq -e 'type == "object"' >/dev/null 2>&1; then
+            echo "::error title=Invalid tags-released::Expected a JSON object of path -> tag, got '${TAGS_RELEASED}'"
+            exit 1
+          fi
+
+          count=0
+          rows=""
+          while IFS=$'\t' read -r path tag; do
+            [ -n "$tag" ] || continue
+            args=(workflow run "$WORKFLOW" --field "${TAG_INPUT}=${tag}")
+            [ -n "$PATH_INPUT" ] && args+=(--field "${PATH_INPUT}=${path}")
+            [ -n "$DISPATCH_REF" ] && args+=(--ref "$DISPATCH_REF")
+
+            echo "::notice title=Dispatching::${WORKFLOW} ${TAG_INPUT}=${tag}"
+            gh "${args[@]}"
+            count=$((count + 1))
+            rows+="| \`${path}\` | \`${tag}\` |"$'\n'
+          done < <(printf '%s' "$TAGS_RELEASED" | jq -r 'to_entries[] | "\(.key)\t\(.value)"')
+
+          echo "dispatched-count=${count}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Dispatched \`${WORKFLOW}\`"
+            echo ""
+            if [ "$count" -eq 0 ]; then
+              echo "Nothing to dispatch — no released tags in this run."
+            else
+              echo "| Path | Tag |"
+              echo "| --- | --- |"
+              printf '%s' "$rows"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

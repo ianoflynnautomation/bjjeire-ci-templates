@@ -1,11 +1,15 @@
 name: Release
 
-# Two shapes in one file — keep the job that matches your repo.
+# Two shapes in one file — keep the jobs that match your repo.
 #
 # A) Single package: release-type + move-major-tag, for a repo whose consumers
 #    pin a floating @v1 (this templates repo itself uses exactly this).
 # B) Monorepo: manifest mode over several independently versioned packages,
-#    dispatching a publish workflow once per package that actually released.
+#    then release-dispatch.yml to publish each package that actually released.
+#
+# Dispatching is a separate workflow because it needs `actions: write`, and a
+# caller must grant the permission superset of every job in a called workflow.
+# Keeping it separate means shape A never grants a permission it does not use.
 
 on:
   push:
@@ -31,14 +35,22 @@ jobs:
   #   permissions:
   #     contents: write
   #     pull-requests: write
-  #     actions: write        # dispatch the publish workflow
   #   uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/release-please.yml@v1
   #   with:
   #     config-file: release-please-config.json
   #     manifest-file: .release-please-manifest.json
-  #     dispatch-workflow: publish-chart.yml
-  #     dispatch-input-name: tag
   #   # Supply release-token only when the release PR must itself trigger other
   #   # workflows — commits authored by GITHUB_TOKEN deliberately do not.
   #   # secrets:
   #   #   release-token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+  #
+  # publish-released:
+  #   name: Publish released charts
+  #   needs: release-monorepo
+  #   if: needs.release-monorepo.outputs.releases-created == 'true'
+  #   permissions:
+  #     actions: write        # gh workflow run
+  #   uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/release-dispatch.yml@v1
+  #   with:
+  #     tags-released: ${{ needs.release-monorepo.outputs.tags-released }}
+  #     workflow: publish-chart.yml

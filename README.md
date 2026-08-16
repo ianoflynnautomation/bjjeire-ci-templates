@@ -25,7 +25,8 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`helm-chart-quality.yml`](.github/workflows/helm-chart-quality.yml) | Helm sibling of the Kustomize workflow: discover charts by glob, lint, `helm template` the release charts, kubeconform gate, rendered-manifests artifact |
 | [`helm-publish-oci.yml`](.github/workflows/helm-publish-oci.yml) | Package + push a chart to any OCI registry, name/version read from Chart.yaml, tag-version assertion and pull-back verification |
 | [`flux-local.yml`](.github/workflows/flux-local.yml) | Offline Flux verification: `flux-local test` per cluster, plus a PR-vs-base `diff` posted as a sticky comment |
-| [`release-please.yml`](.github/workflows/release-please.yml) | release-please in single-package or manifest mode, normalised outputs, floating-major-tag move, per-released-path workflow dispatch |
+| [`release-please.yml`](.github/workflows/release-please.yml) | release-please in single-package or manifest mode, normalised outputs (`paths-released`/`tags-released`), floating-major-tag move |
+| [`release-dispatch.yml`](.github/workflows/release-dispatch.yml) | Fires a `workflow_dispatch` per released package from `tags-released`. Separate from `release-please.yml` so only monorepo callers pay `actions: write` |
 | [`renovate.yml`](.github/workflows/renovate.yml) | Self-hosted Renovate run with runtime-substituted host rules for private registries |
 | [`lint-workflows.yml`](.github/workflows/lint-workflows.yml) | actionlint + zizmor + deprecated-command gate for a repo's workflow files, optional yamllint (file or inline config) |
 | [`sync-labels.yml`](.github/workflows/sync-labels.yml) | Upsert repository labels from a version-controlled YAML file (never deletes; `dry-run` supported) |

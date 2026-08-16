@@ -5,17 +5,17 @@ name: Release Please (Reusable)
 # very different output shapes into one contract: `releases-created`,
 # `paths-released` (JSON array) and `tags-released` (JSON object of path -> tag).
 #
-# On top of that it offers the two things every consumer re-implements by hand:
-#   * move-major-tag — force-move the floating vMAJOR tag onto the new release,
-#     so downstream repos pinned to @v1 pick up non-breaking updates.
-#   * dispatch-workflow — fire a workflow_dispatch once per released path with
-#     that path's tag, which is how a chart/package monorepo publishes only the
-#     components that actually released.
+# It also offers `move-major-tag`: force-move the floating vMAJOR tag onto the
+# new release, so downstream repos pinned to @v1 pick up non-breaking updates.
+#
+# To publish per released package, chain release-dispatch.yml after this and
+# feed it `tags-released`. Dispatching lives in its own workflow because it
+# needs `actions: write`, and a caller must grant the permission superset of
+# every job in a called workflow — including jobs that would skip.
 #
 # Required caller permissions:
 #   contents: write        # create releases and tags
 #   pull-requests: write   # maintain the release PR
-#   actions: write         # only when dispatch-workflow is set
 
 on:
   workflow_call:
@@ -53,30 +53,6 @@ on:
         required: false
         type: boolean
         default: false
-      dispatch-workflow:
-        description: >-
-          Workflow file name (e.g. "publish-chart.yml") to trigger once per
-          released path, with that path's tag. Empty disables dispatching. The
-          target workflow must declare workflow_dispatch and the input named by
-          dispatch-input-name.
-        required: false
-        type: string
-        default: ""
-      dispatch-input-name:
-        description: "Name of the workflow_dispatch input the released tag is passed as."
-        required: false
-        type: string
-        default: "tag"
-      dispatch-path-input-name:
-        description: "Optional second workflow_dispatch input carrying the released path (e.g. the chart directory). Empty passes only the tag."
-        required: false
-        type: string
-        default: ""
-      dispatch-ref:
-        description: "Ref the dispatched workflow runs from. Empty uses the repository default branch."
-        required: false
-        type: string
-        default: ""
       runs-on:
         description: "Runner label for every job."
         required: false
@@ -94,9 +70,6 @@ on:
           GITHUB_TOKEN. Supply a PAT or GitHub App token when the release PR
           must itself trigger other workflows — GITHUB_TOKEN-authored commits
           deliberately do not.
-        required: false
-      dispatch-token:
-        description: "Token used for `gh workflow run`. Defaults to the caller's GITHUB_TOKEN, which is sufficient: workflow_dispatch fires normally when triggered by GITHUB_TOKEN."
         required: false
     outputs:
       releases-created:
@@ -220,7 +193,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
 
@@ -236,43 +209,3 @@ jobs:
           git push origin "v${MAJOR}" --force
           echo "::notice title=Release::v${MAJOR} now points at ${TAG_NAME}"
           echo "Floating tag \`v${MAJOR}\` now points at \`${TAG_NAME}\`." >> "$GITHUB_STEP_SUMMARY"
-
-  dispatch:
-    name: Dispatch downstream workflow
-    needs: release
-    if: ${{ inputs.dispatch-workflow != '' && needs.release.outputs.releases-created == 'true' && needs.release.outputs.tags-released != '{}' }}
-    runs-on: ${{ inputs.runs-on }}
-    timeout-minutes: ${{ inputs.timeout-minutes }}
-    permissions:
-      actions: write
-    steps:
-      - name: Dispatch once per released path
-        env:
-          GH_TOKEN: ${{ secrets.dispatch-token || github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAGS_RELEASED: ${{ needs.release.outputs.tags-released }}
-          WORKFLOW: ${{ inputs.dispatch-workflow }}
-          TAG_INPUT: ${{ inputs.dispatch-input-name }}
-          PATH_INPUT: ${{ inputs.dispatch-path-input-name }}
-          DISPATCH_REF: ${{ inputs.dispatch-ref }}
-        run: |
-          set -euo pipefail
-          rows=""
-          while IFS=$'\t' read -r path tag; do
-            [ -n "$tag" ] || continue
-            args=(workflow run "$WORKFLOW" --field "${TAG_INPUT}=${tag}")
-            [ -n "$PATH_INPUT" ] && args+=(--field "${PATH_INPUT}=${path}")
-            [ -n "$DISPATCH_REF" ] && args+=(--ref "$DISPATCH_REF")
-
-            echo "::notice title=Dispatching::${WORKFLOW} ${TAG_INPUT}=${tag}"
-            gh "${args[@]}"
-            rows+="| \`${path}\` | \`${tag}\` |"$'\n'
-          done < <(jq -r 'to_entries[] | "\(.key)\t\(.value)"' <<< "$TAGS_RELEASED")
-
-          {
-            echo "### Dispatched \`${WORKFLOW}\`"
-            echo ""
-            echo "| Path | Tag |"
-            echo "| --- | --- |"
-            printf '%s' "$rows"
-          } >> "$GITHUB_STEP_SUMMARY"
