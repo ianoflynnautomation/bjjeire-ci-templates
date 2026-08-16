@@ -131,7 +131,7 @@ jobs:
       validate-outcome: ${{ steps.validate.outcome }}
       tflint-outcome: ${{ steps.tflint.outcome }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -177,7 +177,7 @@ jobs:
 
       - name: Setup TFLint
         if: inputs.tflint
-        uses: terraform-linters/setup-tflint@4cb9feea73331a35b422df102992a03a44a3bb33  # v6.2.1
+        uses: terraform-linters/setup-tflint@6e1e0642c0289bd619021bf6b34e3c08ed1e005a  # v6.3.0
         with:
           tflint_version: ${{ inputs.tflint-version }}
 
