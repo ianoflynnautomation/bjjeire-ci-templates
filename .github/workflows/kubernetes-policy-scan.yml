@@ -2,12 +2,14 @@ name: Kubernetes Policy Scan (Reusable)
 
 # Security and policy gates over a set of rendered Kubernetes manifests:
 # Trivy misconfiguration scan (table + SARIF to code scanning), Fairwinds
-# Polaris best-practice audit, and an optional hadolint pass over Dockerfiles.
+# Polaris best-practice audit, an opt-in kube-score workload review, and an
+# optional hadolint pass over Dockerfiles.
 #
 # The manifests are NOT rendered here. Either chain this after
-# kubernetes-manifest-validation.yml and consume its artifact (the default), or
-# point `manifests-path` at a directory that already exists in the repo. That
-# keeps `kustomize build` running exactly once per pipeline.
+# kubernetes-manifest-validation.yml (Kustomize) or helm-chart-quality.yml
+# (Helm) and consume its artifact (the default), or point `manifests-path` at a
+# directory that already exists in the repo. That keeps rendering to exactly
+# once per pipeline.
 #
 # Required caller permissions:
 #   contents: read
@@ -97,6 +99,40 @@ on:
         required: false
         type: boolean
         default: true
+      kube-score:
+        description: >-
+          Run kube-score over the rendered manifests: workload-level checks
+          (probes, resource limits, securityContext, pod anti-affinity) that
+          Trivy and Polaris do not cover. Off by default so it is an explicit
+          opt-in rather than a new gate appearing under existing consumers.
+        required: false
+        type: boolean
+        default: false
+      kube-score-image:
+        description: "kube-score container image, digest-pinned."
+        required: false
+        type: string
+        default: "zegl/kube-score:v1.20.0@sha256:ac4c43ad560af905d66f6bf57b0937c591332e6dbf2167c31193a13b4695ab97"
+      kube-score-enforce:
+        description: "When false, kube-score findings are reported but do not fail the job. Start here — kube-score is opinionated and a fresh repo rarely passes cleanly."
+        required: false
+        type: boolean
+        default: false
+      kube-score-fail-on-warning:
+        description: "Pass --exit-one-on-warning so warnings, not just critical findings, fail the run. Only meaningful with kube-score-enforce: true."
+        required: false
+        type: boolean
+        default: false
+      kube-score-ignore-tests:
+        description: 'Comma-separated kube-score test IDs to skip, e.g. "container-image-tag,pod-networkpolicy".'
+        required: false
+        type: string
+        default: ""
+      kube-score-args:
+        description: "Extra arguments appended to `kube-score score`."
+        required: false
+        type: string
+        default: ""
       hadolint:
         description: "Lint every discovered Dockerfile with hadolint. Auto-skips when the repo contains none."
         required: false
@@ -252,6 +288,44 @@ jobs:
             "$IMAGE" "${args[@]}"
           echo "::endgroup::"
 
+      - name: kube-score workload review
+        if: inputs.kube-score
+        continue-on-error: ${{ !inputs.kube-score-enforce }}
+        env:
+          IMAGE: ${{ inputs.kube-score-image }}
+          SCAN_DIR: ${{ steps.target.outputs.dir }}
+          FAIL_ON_WARNING: ${{ inputs.kube-score-fail-on-warning }}
+          IGNORE_TESTS: ${{ inputs.kube-score-ignore-tests }}
+          EXTRA_ARGS: ${{ inputs.kube-score-args }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find "$SCAN_DIR" -type f \( -name '*.yaml' -o -name '*.yml' \) | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::notice title=kube-score::No manifests to score in ${SCAN_DIR}"
+            exit 0
+          fi
+
+          # --output-format ci emits one [OK]/[WARNING]/[CRITICAL] line per
+          # check, which reads correctly in the Actions log.
+          args=(score --output-format ci)
+          if [ "$FAIL_ON_WARNING" = "true" ]; then args+=(--exit-one-on-warning); fi
+          if [ -n "$IGNORE_TESTS" ]; then
+            IFS=',' read -ra tests <<< "$IGNORE_TESTS"
+            for t in "${tests[@]}"; do
+              t="${t#"${t%%[![:space:]]*}"}"; t="${t%"${t##*[![:space:]]}"}"
+              [ -n "$t" ] || continue
+              args+=(--ignore-test "$t")
+            done
+          fi
+          read -ra extra <<< "$EXTRA_ARGS"
+
+          echo "::group::kube-score"
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/github/workspace" \
+            -w /github/workspace \
+            "$IMAGE" "${args[@]}" "${extra[@]}" "${files[@]}"
+          echo "::endgroup::"
+
       - name: Discover Dockerfiles
         id: dockerfiles
         if: inputs.hadolint
@@ -291,6 +365,8 @@ jobs:
           POLARIS: ${{ inputs.polaris }}
           POLARIS_ENFORCE: ${{ inputs.polaris-enforce }}
           POLARIS_MIN_SCORE: ${{ inputs.polaris-min-score }}
+          KUBE_SCORE: ${{ inputs.kube-score }}
+          KUBE_SCORE_ENFORCE: ${{ inputs.kube-score-enforce }}
           HADOLINT: ${{ inputs.hadolint }}
           HADOLINT_FILES: ${{ steps.dockerfiles.outputs.files }}
         run: |
@@ -303,5 +379,6 @@ jobs:
             echo "| --- | --- | --- |"
             echo "| Trivy (config) | ${TRIVY} | severity ${TRIVY_SEVERITY}, enforce=${TRIVY_ENFORCE} |"
             echo "| Polaris | ${POLARIS} | min score ${POLARIS_MIN_SCORE}, enforce=${POLARIS_ENFORCE} |"
+            echo "| kube-score | ${KUBE_SCORE} | enforce=${KUBE_SCORE_ENFORCE} |"
             echo "| hadolint | ${HADOLINT} | ${HADOLINT_FILES:-no Dockerfiles} |"
           } >> "$GITHUB_STEP_SUMMARY"

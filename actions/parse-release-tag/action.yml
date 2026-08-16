@@ -1,0 +1,142 @@
+name: 'Parse Release Tag'
+description: 'Resolves a component release tag (api-v1.2.3, chart-web-v0.4.0) into the directory that owns it plus the bare version, using a prefix map the caller supplies. Keeps the repo-specific tag-to-path mapping in the caller — this action only does the matching — so tag-driven publish pipelines carry no hardcoded component names.'
+
+inputs:
+  tag:
+    description: 'The release tag to resolve, e.g. "api-v1.2.3". Leading/trailing whitespace is trimmed.'
+    required: true
+  mapping:
+    description: >-
+      Newline-separated "prefix=path" entries, e.g. "api-v=charts/api".
+      The longest matching prefix wins, so "umbrella-v=..." and "v=..." can
+      coexist. Everything after the first "=" is the path, so paths may contain
+      "=". Blank lines and "#" comments are ignored.
+    required: true
+  require-match:
+    description: 'Fail when the tag matches no prefix. Set to "false" to get matched=false and decide in the caller (e.g. to skip a job).'
+    required: false
+    default: 'true'
+  path-must-exist:
+    description: 'Fail when the resolved path is not a directory in the workspace. Turn off when resolving a tag before checking out the code.'
+    required: false
+    default: 'false'
+  summary-title:
+    description: 'Heading used in the step summary. Empty (the default) skips the summary — this is glue, not a result a human reviews.'
+    required: false
+    default: ''
+
+outputs:
+  matched:
+    description: '"true" when the tag matched a prefix, "false" otherwise (only reachable with require-match: false).'
+    value: ${{ steps.parse.outputs.matched }}
+  prefix:
+    description: 'The prefix that matched, e.g. "api-v".'
+    value: ${{ steps.parse.outputs.prefix }}
+  path:
+    description: 'The mapped path for the matched prefix, e.g. "charts/api".'
+    value: ${{ steps.parse.outputs.path }}
+  version:
+    description: 'The tag with the matched prefix removed, e.g. "1.2.3".'
+    value: ${{ steps.parse.outputs.version }}
+  tag:
+    description: 'The trimmed input tag, echoed back so downstream steps read one source.'
+    value: ${{ steps.parse.outputs.tag }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Parse release tag
+      id: parse
+      shell: bash
+      env:
+        TAG: ${{ inputs.tag }}
+        MAPPING: ${{ inputs.mapping }}
+        REQUIRE_MATCH: ${{ inputs.require-match }}
+        PATH_MUST_EXIST: ${{ inputs.path-must-exist }}
+        SUMMARY_TITLE: ${{ inputs.summary-title }}
+      run: |
+        set -euo pipefail
+
+        tag="${TAG#"${TAG%%[![:space:]]*}"}"; tag="${tag%"${tag##*[![:space:]]}"}"
+        if [ -z "$tag" ]; then
+          echo "::error title=Empty tag::'tag' is required"
+          exit 1
+        fi
+
+        best_prefix=""
+        best_path=""
+        known=""
+        while IFS= read -r line; do
+          line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+          [ -n "$line" ] || continue
+          case "$line" in \#*) continue ;; esac
+          if [ "${line#*=}" = "$line" ]; then
+            echo "::error title=Invalid mapping::'${line}' is not a 'prefix=path' entry"
+            exit 1
+          fi
+
+          prefix="${line%%=*}"
+          path="${line#*=}"
+          prefix="${prefix%"${prefix##*[![:space:]]}"}"
+          path="${path#"${path%%[![:space:]]*}"}"
+          if [ -z "$prefix" ] || [ -z "$path" ]; then
+            echo "::error title=Invalid mapping::'${line}' has an empty prefix or path"
+            exit 1
+          fi
+          known+="${prefix} "
+
+          # Longest match wins, so mapping order does not matter.
+          if [ "${tag#"$prefix"}" != "$tag" ] && [ "${#prefix}" -gt "${#best_prefix}" ]; then
+            best_prefix="$prefix"
+            best_path="$path"
+          fi
+        done <<< "$MAPPING"
+
+        if [ -z "$best_prefix" ]; then
+          {
+            echo "matched=false"
+            echo "prefix="
+            echo "path="
+            echo "version="
+            echo "tag=${tag}"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$REQUIRE_MATCH" = "true" ]; then
+            echo "::error title=Unknown tag::'${tag}' matches no prefix in the mapping (known: ${known% })"
+            exit 1
+          fi
+          echo "::warning title=Unknown tag::'${tag}' matches no prefix in the mapping (known: ${known% })"
+          exit 0
+        fi
+
+        version="${tag#"$best_prefix"}"
+        if [ -z "$version" ]; then
+          echo "::error title=Empty version::'${tag}' is exactly the prefix '${best_prefix}' — nothing left to use as a version"
+          exit 1
+        fi
+
+        if [ "$PATH_MUST_EXIST" = "true" ] && [ ! -d "$best_path" ]; then
+          echo "::error title=Missing path::Resolved '${best_path}' but it is not a directory in the workspace"
+          exit 1
+        fi
+
+        {
+          echo "matched=true"
+          echo "prefix=${best_prefix}"
+          echo "path=${best_path}"
+          echo "version=${version}"
+          echo "tag=${tag}"
+        } >> "$GITHUB_OUTPUT"
+        echo "::notice title=Resolved tag::${tag} -> path=${best_path} version=${version}"
+
+        if [ -n "$SUMMARY_TITLE" ]; then
+          {
+            echo "### ${SUMMARY_TITLE}"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Tag | \`${tag}\` |"
+            echo "| Prefix | \`${best_prefix}\` |"
+            echo "| Path | \`${best_path}\` |"
+            echo "| Version | \`${version}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi

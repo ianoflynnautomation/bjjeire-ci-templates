@@ -1,8 +1,9 @@
 name: Release
 
-# release-please cuts SemVer tags (vX.Y.Z) from conventional commits; on each
-# release the floating major tag (vX) is force-moved so consumers pinned to
-# @v1 pick up non-breaking updates automatically.
+# Thin caller over the shared release-please workflow — this repo dogfoods its
+# own template. release-please cuts SemVer tags (vX.Y.Z) from conventional
+# commits; on each release the floating major tag (vX) is force-moved so
+# consumers pinned to @v1 pick up non-breaking updates automatically.
 
 on:
   push:
@@ -12,43 +13,12 @@ permissions:
   contents: read
 
 jobs:
-  release-please:
+  release:
     name: Release Please
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
     permissions:
       contents: write
       pull-requests: write
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      major: ${{ steps.release.outputs.major }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-    steps:
-      - id: release
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
-        with:
-          release-type: simple
-
-  update-major-tag:
-    name: Move Floating Major Tag
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Force-move vMAJOR tag to the new release
-        shell: bash
-        env:
-          MAJOR: ${{ needs.release-please.outputs.major }}
-          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -fa "v${MAJOR}" "${TAG_NAME}^{}" -m "Release ${TAG_NAME}"
-          git push origin "v${MAJOR}" --force
-          echo "::notice title=Release::v${MAJOR} now points at ${TAG_NAME}"
+    uses: ./.github/workflows/release-please.yml
+    with:
+      release-type: simple
+      move-major-tag: true

@@ -1,0 +1,219 @@
+name: 'Helm Render'
+description: 'Renders one or more local Helm charts to plain Kubernetes YAML with `helm template`, building file:// and repo dependencies first. Glob-matched chart paths render into a single output directory so a downstream schema or policy scan consumes one folder instead of re-templating. Charts without a Chart.yaml annotate and skip instead of failing.'
+
+inputs:
+  chart-paths:
+    description: >-
+      Newline-separated chart directories to render. Globs are expanded, so
+      "charts/*" covers every chart without naming them. A directory with no
+      Chart.yaml is skipped with an annotation rather than failing the job.
+    required: true
+  output-dir:
+    description: 'Directory the rendered manifests are written to. One "<slugified-chart-path>.yaml" per chart.'
+    required: false
+    default: 'rendered'
+  release-name:
+    description: 'Release name passed to `helm template`. Empty uses each chart''s own `name` from Chart.yaml, which is the only sane default when rendering several charts at once.'
+    required: false
+    default: ''
+  namespace:
+    description: 'Namespace passed as `--namespace`. Empty omits the flag and Helm renders against "default".'
+    required: false
+    default: ''
+  values-files:
+    description: 'Newline-separated values files applied to every chart, in order, as `--values`. Paths are relative to the workspace, not to the chart.'
+    required: false
+    default: ''
+  set-values:
+    description: 'Newline-separated key=value pairs passed as `--set`. Use for the placeholder overrides a dry-run render needs (image tags, disabled hooks).'
+    required: false
+    default: ''
+  set-string-values:
+    description: 'Newline-separated key=value pairs passed as `--set-string`, for values that must not be type-coerced (numeric-looking tags, booleans as strings).'
+    required: false
+    default: ''
+  include-crds:
+    description: 'Pass `--include-crds` so CRDs land in the rendered output and get validated too.'
+    required: false
+    default: 'false'
+  dependency-build:
+    description: 'Resolve chart dependencies before templating. `helm dependency build` when a Chart.lock exists, `helm dependency update` when it does not. Charts with no `dependencies:` block skip this entirely.'
+    required: false
+    default: 'true'
+  extra-args:
+    description: 'Extra arguments appended to every `helm template` invocation, e.g. "--api-versions=batch/v1".'
+    required: false
+    default: ''
+  fail-on-empty:
+    description: 'Fail when no chart path produced output. Turn off for optional render steps in a repo that may legitimately contain no charts.'
+    required: false
+    default: 'true'
+  summary-title:
+    description: 'Heading used in the step summary. Set to an empty string to skip the summary.'
+    required: false
+    default: 'Helm render'
+
+outputs:
+  rendered-count:
+    description: 'Number of charts that rendered successfully.'
+    value: ${{ steps.render.outputs.rendered-count }}
+  skipped-count:
+    description: 'Number of matched paths skipped (not a directory, or no Chart.yaml).'
+    value: ${{ steps.render.outputs.skipped-count }}
+  output-dir:
+    description: 'Directory the rendered manifests were written to — pass this straight to a scanner or upload-artifact.'
+    value: ${{ steps.render.outputs.output-dir }}
+  files:
+    description: 'Space-separated list of rendered manifest files.'
+    value: ${{ steps.render.outputs.files }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Render Helm charts
+      id: render
+      shell: bash
+      env:
+        CHART_PATHS: ${{ inputs.chart-paths }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        RELEASE_NAME: ${{ inputs.release-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        VALUES_FILES: ${{ inputs.values-files }}
+        SET_VALUES: ${{ inputs.set-values }}
+        SET_STRING_VALUES: ${{ inputs.set-string-values }}
+        INCLUDE_CRDS: ${{ inputs.include-crds }}
+        DEPENDENCY_BUILD: ${{ inputs.dependency-build }}
+        EXTRA_ARGS: ${{ inputs.extra-args }}
+        FAIL_ON_EMPTY: ${{ inputs.fail-on-empty }}
+        SUMMARY_TITLE: ${{ inputs.summary-title }}
+      run: |
+        set -euo pipefail
+
+        if ! command -v helm >/dev/null 2>&1; then
+          echo "::error title=Helm missing::Install Helm before this action (azure/setup-helm or ianoflynnautomation/bjjeire-ci-templates/actions/setup-kubernetes-tools)"
+          exit 1
+        fi
+
+        mkdir -p "$OUTPUT_DIR"
+
+        # Shared flags, built once and reused for every chart.
+        common_args=()
+        [ -n "$NAMESPACE" ] && common_args+=(--namespace "$NAMESPACE")
+        [ "$INCLUDE_CRDS" = "true" ] && common_args+=(--include-crds)
+
+        while IFS= read -r vf; do
+          vf="${vf#"${vf%%[![:space:]]*}"}"; vf="${vf%"${vf##*[![:space:]]}"}"
+          [ -n "$vf" ] || continue
+          if [ ! -f "$vf" ]; then
+            echo "::error title=Missing values file::${vf} does not exist"
+            exit 1
+          fi
+          common_args+=(--values "$vf")
+        done <<< "$VALUES_FILES"
+
+        while IFS= read -r kv; do
+          kv="${kv#"${kv%%[![:space:]]*}"}"; kv="${kv%"${kv##*[![:space:]]}"}"
+          [ -n "$kv" ] || continue
+          common_args+=(--set "$kv")
+        done <<< "$SET_VALUES"
+
+        while IFS= read -r kv; do
+          kv="${kv#"${kv%%[![:space:]]*}"}"; kv="${kv%"${kv##*[![:space:]]}"}"
+          [ -n "$kv" ] || continue
+          common_args+=(--set-string "$kv")
+        done <<< "$SET_STRING_VALUES"
+
+        read -ra extra_args <<< "$EXTRA_ARGS"
+
+        rendered=0
+        skipped=0
+        files=""
+        rows=""
+        shopt -s nullglob
+
+        while IFS= read -r pattern; do
+          pattern="${pattern#"${pattern%%[![:space:]]*}"}"; pattern="${pattern%"${pattern##*[![:space:]]}"}"
+          [ -n "$pattern" ] || continue
+
+          matched=0
+          # Unquoted on purpose: applies glob expansion to the caller pattern.
+          # shellcheck disable=SC2086
+          for dir in $pattern; do
+            matched=1
+            if [ ! -d "$dir" ]; then
+              echo "::warning title=Not a directory::${dir} is not a directory — skipping"
+              skipped=$((skipped + 1))
+              rows+="| \`${dir}\` | skipped (not a directory) |"$'\n'
+              continue
+            fi
+            if [ ! -f "${dir}/Chart.yaml" ]; then
+              echo "::notice title=No chart::${dir} has no Chart.yaml — skipping"
+              skipped=$((skipped + 1))
+              rows+="| \`${dir}\` | skipped (no Chart.yaml) |"$'\n'
+              continue
+            fi
+
+            chart_name="$(awk '/^name:[[:space:]]/ {gsub(/^name:[[:space:]]*|["'"'"']/, ""); print; exit}' "${dir}/Chart.yaml")"
+            name="${RELEASE_NAME:-$chart_name}"
+            if [ -z "$name" ]; then
+              echo "::error file=${dir}/Chart.yaml,title=Unnamed chart::Chart.yaml has no top-level 'name' and no release-name was supplied"
+              exit 1
+            fi
+
+            # Only charts that declare dependencies pay for the resolve step.
+            if [ "$DEPENDENCY_BUILD" = "true" ] && grep -q '^dependencies:' "${dir}/Chart.yaml"; then
+              echo "::group::helm dependency (${dir})"
+              if [ -f "${dir}/Chart.lock" ]; then
+                helm dependency build "$dir"
+              else
+                echo "::notice title=No Chart.lock::${dir} has dependencies but no lock file — running 'helm dependency update'"
+                helm dependency update "$dir"
+              fi
+              echo "::endgroup::"
+            fi
+
+            slug="${dir#./}"; slug="${slug%/}"; slug="${slug//\//-}"
+            out="${OUTPUT_DIR}/${slug}.yaml"
+
+            echo "::group::helm template ${name} ${dir}"
+            helm template "$name" "$dir" "${common_args[@]}" "${extra_args[@]}" > "$out"
+            echo "::endgroup::"
+
+            rendered=$((rendered + 1))
+            files+="${out} "
+            docs="$(grep -c '^---' "$out" || true)"
+            rows+="| \`${dir}\` | \`${chart_name}\` | \`${out}\` | ${docs} |"$'\n'
+          done
+
+          if [ "$matched" -eq 0 ]; then
+            echo "::warning title=No match::Pattern '${pattern}' matched nothing"
+            rows+="| \`${pattern}\` | — | no match | 0 |"$'\n'
+          fi
+        done <<< "$CHART_PATHS"
+
+        {
+          echo "rendered-count=${rendered}"
+          echo "skipped-count=${skipped}"
+          echo "output-dir=${OUTPUT_DIR}"
+          echo "files=${files% }"
+        } >> "$GITHUB_OUTPUT"
+
+        if [ -n "$SUMMARY_TITLE" ]; then
+          {
+            echo "### ${SUMMARY_TITLE}"
+            echo ""
+            echo "| Chart path | Chart | Output | Documents |"
+            echo "| --- | --- | --- | --- |"
+            printf '%s' "$rows"
+            echo ""
+            echo "Rendered **${rendered}**, skipped **${skipped}**."
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        if [ "$rendered" -eq 0 ]; then
+          if [ "$FAIL_ON_EMPTY" = "true" ]; then
+            echo "::error title=Nothing rendered::No path in 'chart-paths' produced output — check the patterns"
+            exit 1
+          fi
+          echo "::warning title=Nothing rendered::No path in 'chart-paths' produced output"
+        fi

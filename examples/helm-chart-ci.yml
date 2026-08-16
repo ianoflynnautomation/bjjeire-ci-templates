@@ -1,0 +1,53 @@
+name: Helm Charts
+
+# Golden path for a Helm chart repo (single chart, or an umbrella with
+# subcharts): lint every chart, render the release-level chart once, schema-
+# validate it, then reuse the rendered artifact for the workload review.
+# `helm template` runs once per pipeline, not once per scanner.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 4 * * 1" # weekly re-scan: new policy rules land against unchanged charts
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  charts:
+    name: Helm
+    permissions:
+      contents: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/helm-chart-quality.yml@v1
+    with:
+      chart-paths: "."
+      render-charts: charts/umbrella
+      namespace: my-namespace
+      set-values: |
+        api.image.tag=ci
+        frontend.image.tag=ci # dry-run placeholders only — never a credential
+      schema-locations: |
+        default
+        https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+
+  scan:
+    name: Policy scan
+    needs: charts
+    permissions:
+      contents: read
+      security-events: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/kubernetes-policy-scan.yml@v1
+    with:
+      manifests-artifact: ${{ needs.charts.outputs.artifact-name }}
+      trivy-severity: HIGH,CRITICAL
+      polaris-min-score: 80
+      kube-score: true
+      kube-score-enforce: false

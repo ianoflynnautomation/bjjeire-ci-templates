@@ -9,7 +9,7 @@ rules:
 
   artipacked:
     ignore:
-      - release.yml
+      - release-please.yml
 
   excessive-permissions:
     ignore:

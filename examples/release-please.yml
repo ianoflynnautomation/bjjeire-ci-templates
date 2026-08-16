@@ -1,0 +1,44 @@
+name: Release
+
+# Two shapes in one file — keep the job that matches your repo.
+#
+# A) Single package: release-type + move-major-tag, for a repo whose consumers
+#    pin a floating @v1 (this templates repo itself uses exactly this).
+# B) Monorepo: manifest mode over several independently versioned packages,
+#    dispatching a publish workflow once per package that actually released.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release Please
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/release-please.yml@v1
+    with:
+      release-type: simple
+      move-major-tag: true
+
+  # release-monorepo:
+  #   name: Release Please
+  #   permissions:
+  #     contents: write
+  #     pull-requests: write
+  #     actions: write        # dispatch the publish workflow
+  #   uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/release-please.yml@v1
+  #   with:
+  #     config-file: release-please-config.json
+  #     manifest-file: .release-please-manifest.json
+  #     dispatch-workflow: publish-chart.yml
+  #     dispatch-input-name: tag
+  #   # Supply release-token only when the release PR must itself trigger other
+  #   # workflows — commits authored by GITHUB_TOKEN deliberately do not.
+  #   # secrets:
+  #   #   release-token: ${{ secrets.RELEASE_PLEASE_TOKEN }}

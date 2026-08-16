@@ -1,0 +1,56 @@
+name: Publish chart
+
+# Tag-driven Helm publish for a chart monorepo. release-please tags each chart
+# with its own prefix (api-v1.2.3, web-v0.4.0); parse-release-tag turns that
+# prefix into the chart directory, and the shared workflow reads the name and
+# version out of that chart's Chart.yaml.
+#
+# The prefix map is the only repo-specific line in the file. For a single-chart
+# repo, drop the resolve job and pass `chart-dir` directly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)publish — e.g. api-v1.2.3"
+        required: true
+        type: string
+
+concurrency:
+  group: publish-chart-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      path: ${{ steps.chart.outputs.path }}
+      version: ${{ steps.chart.outputs.version }}
+    steps:
+      - id: chart
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/parse-release-tag@v1
+        with:
+          tag: ${{ inputs.tag }}
+          mapping: |
+            api-v=charts/api
+            web-v=charts/web
+            umbrella-v=charts/umbrella
+
+  publish:
+    name: Publish ${{ inputs.tag }}
+    needs: resolve
+    permissions:
+      contents: read
+      packages: write 
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/helm-publish-oci.yml@v1
+    with:
+      chart-dir: ${{ needs.resolve.outputs.path }}
+      checkout-ref: ${{ inputs.tag }}
+      expected-version: ${{ needs.resolve.outputs.version }}

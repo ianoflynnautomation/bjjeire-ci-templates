@@ -21,8 +21,11 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`terraform-plan.yml`](.github/workflows/terraform-plan.yml) | fmt + validate + plan (Azure OIDC), plan artifact + step summary, `has-changes` output |
 | [`terraform-apply.yml`](.github/workflows/terraform-apply.yml) | Applies the exact plan artifact, gated by a GitHub environment (required reviewers) |
 | [`kubernetes-manifest-validation.yml`](.github/workflows/kubernetes-manifest-validation.yml) | Render Kustomize overlays (globs, no cluster list), helm lint, kubeconform schema gate, content deny-pattern, rendered-manifests artifact |
-| [`kubernetes-policy-scan.yml`](.github/workflows/kubernetes-policy-scan.yml) | Trivy misconfig (+ SARIF to code scanning), Polaris audit and hadolint over already-rendered manifests |
+| [`kubernetes-policy-scan.yml`](.github/workflows/kubernetes-policy-scan.yml) | Trivy misconfig (+ SARIF to code scanning), Polaris audit, opt-in kube-score and hadolint over already-rendered manifests |
+| [`helm-chart-quality.yml`](.github/workflows/helm-chart-quality.yml) | Helm sibling of the Kustomize workflow: discover charts by glob, lint, `helm template` the release charts, kubeconform gate, rendered-manifests artifact |
+| [`helm-publish-oci.yml`](.github/workflows/helm-publish-oci.yml) | Package + push a chart to any OCI registry, name/version read from Chart.yaml, tag-version assertion and pull-back verification |
 | [`flux-local.yml`](.github/workflows/flux-local.yml) | Offline Flux verification: `flux-local test` per cluster, plus a PR-vs-base `diff` posted as a sticky comment |
+| [`release-please.yml`](.github/workflows/release-please.yml) | release-please in single-package or manifest mode, normalised outputs, floating-major-tag move, per-released-path workflow dispatch |
 | [`renovate.yml`](.github/workflows/renovate.yml) | Self-hosted Renovate run with runtime-substituted host rules for private registries |
 | [`lint-workflows.yml`](.github/workflows/lint-workflows.yml) | actionlint + zizmor + deprecated-command gate for a repo's workflow files, optional yamllint (file or inline config) |
 | [`sync-labels.yml`](.github/workflows/sync-labels.yml) | Upsert repository labels from a version-controlled YAML file (never deletes; `dry-run` supported) |
@@ -46,10 +49,15 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`actions/oci-tag-audit`](actions/oci-tag-audit/action.yml) | Assert caller-supplied `repository:tag` refs exist in any Registry v2 host; fails closed on probe errors. Extracting the pins stays in the caller |
 | [`actions/setup-kubernetes-tools`](actions/setup-kubernetes-tools/action.yml) | Flux CLI, Kustomize, kubeconform and Helm — each installed only when you pass its version |
 | [`actions/kustomize-render`](actions/kustomize-render/action.yml) | Build a glob-matched set of overlays into one output dir; empty/missing kustomizations annotate instead of failing |
+| [`actions/helm-render`](actions/helm-render/action.yml) | `helm template` a glob-matched set of charts into one output dir, resolving dependencies first; non-charts annotate instead of failing |
+| [`actions/helm-push-oci`](actions/helm-push-oci/action.yml) | Package and push a chart to any OCI registry, name/version from Chart.yaml, with an expected-version assertion and pull-back verification |
+| [`actions/parse-release-tag`](actions/parse-release-tag/action.yml) | Resolve a component tag (`api-v1.2.3`) to its directory and bare version via a caller-supplied prefix map. The map stays in the caller |
 
 Full input/output documentation lives in each workflow's `workflow_call` block — every input has a description, type, and default. Ready-to-copy caller workflows are in [`examples/`](examples/).
 
 > **Moving a Flux GitOps repo onto these?** Cluster lists become globs, rendering happens once and is shared by artifact, and check names change. See [`docs/migrating-gitops-workflows.md`](docs/migrating-gitops-workflows.md).
+
+> **Moving a Helm chart repo onto these?** The chart list becomes a glob, rendering happens once and is shared by artifact, and the tag-to-chart map is the only repo-specific line left in the publish caller. See [`docs/migrating-helm-chart-workflows.md`](docs/migrating-helm-chart-workflows.md).
 
 > **Migrating from the Playwright workflows in `bjjeire-tests`?** The inputs were renamed to `kebab-case`, the fourteen named secrets collapsed into one `test-env-vars` payload, and `runner_label` became `runs-on` with a different default. See [`docs/migrating-playwright-workflows.md`](docs/migrating-playwright-workflows.md).
 

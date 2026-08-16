@@ -73,3 +73,16 @@ updates:
     directory: "/actions/oci-tag-audit"
     schedule:
       interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: "/actions/helm-render"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/helm-push-oci"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/parse-release-tag"
+    schedule:
+      interval: weekly

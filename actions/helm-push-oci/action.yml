@@ -1,0 +1,262 @@
+name: 'Push Helm Chart to OCI'
+description: 'Packages a local Helm chart and pushes it to any OCI registry (GHCR, ACR, ECR, Docker Hub, Harbor), optionally pulling it back to prove the push is resolvable. Chart name and version are read from Chart.yaml so the release tag never has to be re-encoded in CI, and an expected-version assertion catches a chart published under the wrong tag.'
+
+inputs:
+  chart-dir:
+    description: 'Directory containing the chart''s Chart.yaml.'
+    required: true
+  registry:
+    description: 'OCI registry host, e.g. ghcr.io, myacr.azurecr.io.'
+    required: false
+    default: 'ghcr.io'
+  repository:
+    description: 'Registry namespace the chart is pushed under, without the chart name — Helm appends it. For GHCR this is the owner (or owner/sub-path). Lowercased internally.'
+    required: true
+  chart-name:
+    description: 'Chart name. Empty reads `name` from Chart.yaml, which is what `helm package` uses for the archive filename anyway.'
+    required: false
+    default: ''
+  chart-version:
+    description: 'Version to package. Empty reads `version` from Chart.yaml. Set this to override the committed version (e.g. a pre-release suffix).'
+    required: false
+    default: ''
+  expected-version:
+    description: 'Assert the resolved chart version equals this value before packaging, and fail otherwise. Pass the version parsed from a release tag to catch a chart whose Chart.yaml was never bumped. Empty disables the check.'
+    required: false
+    default: ''
+  app-version:
+    description: 'Value for `helm package --app-version`. Empty keeps the appVersion committed in Chart.yaml.'
+    required: false
+    default: ''
+  dependency-build:
+    description: 'Resolve chart dependencies before packaging. `helm dependency build` when a Chart.lock exists, `helm dependency update` when it does not. Charts with no `dependencies:` block skip this entirely — an umbrella chart cannot be packaged without it.'
+    required: false
+    default: 'true'
+  username:
+    description: 'Registry username. For GHCR any non-empty value works when the password is a token.'
+    required: false
+    default: ${{ github.actor }}
+  password:
+    description: 'Registry password or token, read from the environment and piped to `helm registry login --password-stdin` — never placed in argv. For GHCR this needs packages: write.'
+    required: true
+  package-dir:
+    description: 'Directory the .tgz is written to. Defaults to a directory under RUNNER_TEMP so the archive never pollutes the workspace (and never lands in a later `actions/upload-artifact` glob).'
+    required: false
+    default: ''
+  verify-pull:
+    description: 'Pull the chart back from the registry after pushing. Catches a push that reported success but did not produce a resolvable tag.'
+    required: false
+    default: 'true'
+  logout:
+    description: 'Run `helm registry logout` when the action finishes, removing the credential from the runner''s Helm config.'
+    required: false
+    default: 'true'
+  summary-title:
+    description: 'Heading used in the step summary. Set to an empty string to skip the summary.'
+    required: false
+    default: 'Helm chart published'
+
+outputs:
+  chart-name:
+    description: 'Resolved chart name.'
+    value: ${{ steps.metadata.outputs.chart-name }}
+  chart-version:
+    description: 'Resolved chart version.'
+    value: ${{ steps.metadata.outputs.chart-version }}
+  reference:
+    description: 'Full pushed reference, e.g. oci://ghcr.io/owner/my-chart:1.2.3.'
+    value: ${{ steps.push.outputs.reference }}
+  digest:
+    description: 'Manifest digest (sha256:...) reported by `helm push`, empty if Helm did not print one.'
+    value: ${{ steps.push.outputs.digest }}
+  package-path:
+    description: 'Path to the packaged .tgz on the runner.'
+    value: ${{ steps.package.outputs.path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve chart metadata
+      id: metadata
+      shell: bash
+      env:
+        CHART_DIR: ${{ inputs.chart-dir }}
+        CHART_NAME: ${{ inputs.chart-name }}
+        CHART_VERSION: ${{ inputs.chart-version }}
+        EXPECTED_VERSION: ${{ inputs.expected-version }}
+        REGISTRY: ${{ inputs.registry }}
+        REPOSITORY: ${{ inputs.repository }}
+        PACKAGE_DIR: ${{ inputs.package-dir }}
+      run: |
+        set -euo pipefail
+
+        if ! command -v helm >/dev/null 2>&1; then
+          echo "::error title=Helm missing::Install Helm before this action (azure/setup-helm or ianoflynnautomation/bjjeire-ci-templates/actions/setup-kubernetes-tools)"
+          exit 1
+        fi
+        if [ ! -f "${CHART_DIR}/Chart.yaml" ]; then
+          echo "::error title=No chart::${CHART_DIR}/Chart.yaml does not exist"
+          exit 1
+        fi
+
+        read_field() {
+          awk -v key="$1" '$0 ~ "^"key":[[:space:]]" {sub("^"key":[[:space:]]*", ""); gsub(/["'"'"']/, ""); print; exit}' "${CHART_DIR}/Chart.yaml"
+        }
+
+        name="${CHART_NAME:-$(read_field name)}"
+        version="${CHART_VERSION:-$(read_field version)}"
+        if [ -z "$name" ] || [ -z "$version" ]; then
+          echo "::error file=${CHART_DIR}/Chart.yaml,title=Incomplete chart metadata::Could not resolve name='${name}' version='${version}'"
+          exit 1
+        fi
+
+        # A tag-driven publish must not silently ship a stale Chart.yaml.
+        if [ -n "$EXPECTED_VERSION" ] && [ "$EXPECTED_VERSION" != "$version" ]; then
+          echo "::error file=${CHART_DIR}/Chart.yaml,title=Version mismatch::Expected ${EXPECTED_VERSION} but Chart.yaml declares ${version}"
+          exit 1
+        fi
+
+        # OCI paths are case-sensitive and registries reject uppercase.
+        repo_path="$(printf '%s' "${REGISTRY}/${REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+        repo_path="${repo_path%/}"
+
+        {
+          echo "chart-name=${name}"
+          echo "chart-version=${version}"
+          echo "repo-path=${repo_path}"
+          echo "package-dir=${PACKAGE_DIR:-${RUNNER_TEMP}/helm-package}"
+        } >> "$GITHUB_OUTPUT"
+        echo "::notice title=Chart::${name} ${version} -> oci://${repo_path}"
+
+    - name: Registry login
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        USERNAME: ${{ inputs.username }}
+        PASSWORD: ${{ inputs.password }}
+      run: |
+        set -euo pipefail
+        if [ -z "$PASSWORD" ]; then
+          echo "::error title=No credential::'password' is empty — pass a registry token"
+          exit 1
+        fi
+        echo "::group::helm registry login"
+        printf '%s' "$PASSWORD" | helm registry login "$REGISTRY" --username "$USERNAME" --password-stdin
+        echo "::endgroup::"
+
+    - name: Build chart dependencies
+      shell: bash
+      env:
+        CHART_DIR: ${{ inputs.chart-dir }}
+        DEPENDENCY_BUILD: ${{ inputs.dependency-build }}
+      run: |
+        set -euo pipefail
+        if [ "$DEPENDENCY_BUILD" != "true" ] || ! grep -q '^dependencies:' "${CHART_DIR}/Chart.yaml"; then
+          echo "::notice title=Dependencies::Nothing to resolve for ${CHART_DIR}"
+          exit 0
+        fi
+        echo "::group::helm dependency"
+        if [ -f "${CHART_DIR}/Chart.lock" ]; then
+          helm dependency build "$CHART_DIR"
+        else
+          echo "::notice title=No Chart.lock::${CHART_DIR} has dependencies but no lock file — running 'helm dependency update'"
+          helm dependency update "$CHART_DIR"
+        fi
+        echo "::endgroup::"
+
+    - name: Package chart
+      id: package
+      shell: bash
+      env:
+        CHART_DIR: ${{ inputs.chart-dir }}
+        CHART_NAME: ${{ steps.metadata.outputs.chart-name }}
+        CHART_VERSION: ${{ steps.metadata.outputs.chart-version }}
+        APP_VERSION: ${{ inputs.app-version }}
+        PACKAGE_DIR: ${{ steps.metadata.outputs.package-dir }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$PACKAGE_DIR"
+        args=(package "$CHART_DIR" --destination "$PACKAGE_DIR" --version "$CHART_VERSION")
+        [ -n "$APP_VERSION" ] && args+=(--app-version "$APP_VERSION")
+
+        echo "::group::helm package"
+        helm "${args[@]}"
+        echo "::endgroup::"
+
+        path="${PACKAGE_DIR}/${CHART_NAME}-${CHART_VERSION}.tgz"
+        if [ ! -f "$path" ]; then
+          echo "::error title=Package missing::Expected ${path} — does Chart.yaml's name match 'chart-name'?"
+          ls -la "$PACKAGE_DIR"
+          exit 1
+        fi
+        echo "path=${path}" >> "$GITHUB_OUTPUT"
+
+    - name: Push chart
+      id: push
+      shell: bash
+      env:
+        PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        REPO_PATH: ${{ steps.metadata.outputs.repo-path }}
+        CHART_NAME: ${{ steps.metadata.outputs.chart-name }}
+        CHART_VERSION: ${{ steps.metadata.outputs.chart-version }}
+      run: |
+        set -euo pipefail
+        echo "::group::helm push"
+        # helm push writes "Pushed:"/"Digest:" to stderr; fold it into stdout so
+        # the digest can be captured without losing the live log.
+        push_log="$(helm push "$PACKAGE_PATH" "oci://${REPO_PATH}" 2>&1 | tee /dev/stderr)"
+        echo "::endgroup::"
+
+        digest="$(printf '%s\n' "$push_log" | awk '/^Digest:/ {print $2; exit}')"
+        reference="oci://${REPO_PATH}/${CHART_NAME}:${CHART_VERSION}"
+        {
+          echo "reference=${reference}"
+          echo "digest=${digest}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Verify pull
+      if: inputs.verify-pull == 'true'
+      shell: bash
+      env:
+        REPO_PATH: ${{ steps.metadata.outputs.repo-path }}
+        CHART_NAME: ${{ steps.metadata.outputs.chart-name }}
+        CHART_VERSION: ${{ steps.metadata.outputs.chart-version }}
+      run: |
+        set -euo pipefail
+        dest="${RUNNER_TEMP}/helm-verify"
+        rm -rf "$dest" && mkdir -p "$dest"
+        echo "::group::helm pull"
+        helm pull "oci://${REPO_PATH}/${CHART_NAME}" --version "$CHART_VERSION" --destination "$dest"
+        ls -la "$dest"
+        echo "::endgroup::"
+
+    - name: Write summary
+      if: always() && inputs.summary-title != ''
+      shell: bash
+      env:
+        SUMMARY_TITLE: ${{ inputs.summary-title }}
+        CHART_NAME: ${{ steps.metadata.outputs.chart-name }}
+        CHART_VERSION: ${{ steps.metadata.outputs.chart-version }}
+        REFERENCE: ${{ steps.push.outputs.reference }}
+        DIGEST: ${{ steps.push.outputs.digest }}
+      run: |
+        {
+          echo "### ${SUMMARY_TITLE}"
+          echo ""
+          echo "| Field | Value |"
+          echo "| --- | --- |"
+          echo "| Chart | \`${CHART_NAME}\` |"
+          echo "| Version | \`${CHART_VERSION}\` |"
+          echo "| Reference | \`${REFERENCE:-not pushed}\` |"
+          echo "| Digest | \`${DIGEST:-unknown}\` |"
+        } >> "$GITHUB_STEP_SUMMARY"
+        if [ -n "${REFERENCE}" ]; then
+          echo "::notice title=Published::${REFERENCE}"
+        fi
+
+    - name: Registry logout
+      if: always() && inputs.logout == 'true'
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+      run: helm registry logout "$REGISTRY" || true

@@ -1,0 +1,529 @@
+name: Helm Chart Quality (Reusable)
+
+# Lint and dry-run render a repository of Helm charts: discover charts from
+# glob patterns (never a hardcoded chart list), resolve dependencies, `helm
+# lint`, then `helm template` the release-level charts and validate the output
+# against the Kubernetes schema with kubeconform. Publishes the rendered
+# manifests as an artifact so a downstream policy scan does not template them
+# again — chain it with kubernetes-policy-scan.yml via `needs:`.
+#
+# This is the Helm sibling of kubernetes-manifest-validation.yml (Kustomize).
+# Both emit the same `artifact-name` output, so the same policy-scan job
+# consumes either.
+#
+# Required caller permissions:
+#   contents: read
+
+on:
+  workflow_call:
+    inputs:
+      chart-paths:
+        description: >-
+          Newline-separated paths searched for charts to lint. Globs are
+          expanded. A path that is itself a chart (contains Chart.yaml) is used
+          directly; any other directory is searched recursively for charts.
+          Vendored subcharts under a "charts/" directory are never linted twice.
+        required: false
+        type: string
+        default: "."
+      render-charts:
+        description: >-
+          Newline-separated chart paths to `helm template` and schema-validate.
+          Globs are expanded. Usually the release-level (umbrella) charts only —
+          subcharts are rendered as part of their parent. Empty skips the render
+          job entirely.
+        required: false
+        type: string
+        default: ""
+      helm-version:
+        description: 'Helm version, with or without the leading "v".'
+        required: false
+        type: string
+        default: "3.17.0"
+      helm-lint:
+        description: "Run `helm lint` over every discovered chart. Turn off to render and validate only."
+        required: false
+        type: boolean
+        default: true
+      lint-strict:
+        description: "Pass `--strict` to helm lint: linter warnings become failures."
+        required: false
+        type: boolean
+        default: false
+      lint-values-files:
+        description: "Newline-separated values files passed to every `helm lint` as `--values`. Use when a chart cannot lint against its committed defaults."
+        required: false
+        type: string
+        default: ""
+      lint-args:
+        description: 'Extra arguments appended to every `helm lint`, e.g. "--quiet".'
+        required: false
+        type: string
+        default: ""
+      dependency-build:
+        description: "Resolve chart dependencies before lint/template (`helm dependency build`, or `update` when there is no Chart.lock). Required for umbrella charts — they cannot lint or render without their subcharts."
+        required: false
+        type: boolean
+        default: true
+      release-name:
+        description: "Release name for `helm template`. Empty uses each chart's own name from Chart.yaml."
+        required: false
+        type: string
+        default: ""
+      namespace:
+        description: "Namespace passed to `helm template`. Empty omits the flag."
+        required: false
+        type: string
+        default: ""
+      values-files:
+        description: "Newline-separated values files applied to every rendered chart, in order, as `--values`."
+        required: false
+        type: string
+        default: ""
+      set-values:
+        description: >-
+          Newline-separated key=value pairs passed to `helm template` as
+          `--set`. This is where a dry run supplies placeholders it has no real
+          value for, e.g. "api.image.tag=ci". Never put a credential here —
+          values reach the log; secrets belong in a secretKeyRef at runtime.
+        required: false
+        type: string
+        default: ""
+      set-string-values:
+        description: "Newline-separated key=value pairs passed as `--set-string`, for values that must not be type-coerced."
+        required: false
+        type: string
+        default: ""
+      include-crds:
+        description: "Pass `--include-crds` so CRDs are rendered and validated too."
+        required: false
+        type: boolean
+        default: false
+      template-args:
+        description: 'Extra arguments appended to every `helm template`, e.g. "--api-versions=batch/v1".'
+        required: false
+        type: string
+        default: ""
+      validate:
+        description: "Validate the rendered manifests with kubeconform."
+        required: false
+        type: boolean
+        default: true
+      kubernetes-version:
+        description: 'Kubernetes API version kubeconform validates against, e.g. "1.31.0". "master" tracks the latest schema.'
+        required: false
+        type: string
+        default: "master"
+      kubeconform-version:
+        description: 'kubeconform version, without the leading "v".'
+        required: false
+        type: string
+        default: "0.6.7"
+      strict:
+        description: "Pass -strict to kubeconform: reject manifests with fields not present in the schema."
+        required: false
+        type: boolean
+        default: true
+      ignore-missing-schemas:
+        description: "Pass -ignore-missing-schemas: skip CRDs with no published schema rather than failing. Turn off once you supply CRD schemas via schema-locations."
+        required: false
+        type: boolean
+        default: true
+      schema-locations:
+        description: >-
+          Newline-separated kubeconform -schema-location values. "default" is
+          the upstream Kubernetes schema store; add the CRDs-catalog URL to
+          validate custom resources instead of skipping them.
+        required: false
+        type: string
+        default: "default"
+      skip-kinds:
+        description: 'Comma-separated kinds kubeconform skips entirely, e.g. "CustomResourceDefinition".'
+        required: false
+        type: string
+        default: ""
+      upload-artifact:
+        description: "Upload the rendered manifests so downstream jobs (policy scanning, kube-score, drift review) consume them without re-rendering."
+        required: false
+        type: boolean
+        default: true
+      artifact-name:
+        description: "Name of the rendered-manifests artifact."
+        required: false
+        type: string
+        default: "rendered-manifests"
+      artifact-retention-days:
+        description: "Retention period for the rendered-manifests artifact."
+        required: false
+        type: number
+        default: 7
+      output-dir:
+        description: "Directory the rendered manifests are written to."
+        required: false
+        type: string
+        default: "rendered"
+      runs-on:
+        description: "Runner label for both jobs."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout applied to each job."
+        required: false
+        type: number
+        default: 20
+    outputs:
+      chart-count:
+        description: "Number of charts discovered under chart-paths."
+        value: ${{ jobs.lint.outputs.chart-count }}
+      charts:
+        description: "Newline-separated list of the discovered chart directories, in lint order."
+        value: ${{ jobs.lint.outputs.charts }}
+      rendered-count:
+        description: "Number of charts rendered, empty when render-charts was not set."
+        value: ${{ jobs.render.outputs.rendered-count }}
+      artifact-name:
+        description: "Name of the uploaded rendered-manifests artifact — pass it straight to kubernetes-policy-scan.yml. Empty when nothing was uploaded."
+        value: ${{ jobs.render.outputs.artifact-name }}
+
+jobs:
+  lint:
+    name: Helm lint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    outputs:
+      chart-count: ${{ steps.discover.outputs.chart-count }}
+      charts: ${{ steps.discover.outputs.charts }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: ${{ startsWith(inputs.helm-version, 'v') && inputs.helm-version || format('v{0}', inputs.helm-version) }}
+
+      - name: Discover charts
+        id: discover
+        env:
+          CHART_PATHS: ${{ inputs.chart-paths }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          charts=""
+
+          echo "::group::Chart discovery"
+          while IFS= read -r pattern; do
+            pattern="${pattern#"${pattern%%[![:space:]]*}"}"; pattern="${pattern%"${pattern##*[![:space:]]}"}"
+            [ -n "$pattern" ] || continue
+
+            matched=0
+            # Unquoted on purpose: applies glob expansion to the caller pattern.
+            # shellcheck disable=SC2086
+            for entry in $pattern; do
+              matched=1
+              if [ ! -d "$entry" ]; then
+                echo "::warning title=Not a directory::${entry} is not a directory — skipping"
+                continue
+              fi
+              if [ -f "${entry}/Chart.yaml" ]; then
+                charts+="${entry%/}"$'\n'
+                continue
+              fi
+              # Not a chart itself — search it, but never descend into vendored
+              # subcharts: `helm dependency build` unpacks them under charts/
+              # and linting those is linting someone else's chart.
+              while IFS= read -r found; do
+                charts+="$(dirname "$found")"$'\n'
+              done < <(find "$entry" -type f -name Chart.yaml -not -path '*/charts/*' | sort)
+            done
+            if [ "$matched" -eq 0 ]; then
+              echo "::warning title=No match::Pattern '${pattern}' matched nothing"
+            fi
+          done <<< "$CHART_PATHS"
+
+          charts="$(printf '%s' "$charts" | sed '/^$/d' | sort -u)"
+          count="$(printf '%s' "$charts" | grep -c . || true)"
+          printf '%s\n' "$charts"
+          echo "::endgroup::"
+
+          {
+            echo "charts<<CHARTS_EOF"
+            printf '%s\n' "$charts"
+            echo "CHARTS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "chart-count=${count}" >> "$GITHUB_OUTPUT"
+
+          if [ "$count" -eq 0 ]; then
+            echo "::error title=No charts::No Chart.yaml found under the supplied chart-paths"
+            exit 1
+          fi
+          echo "::notice title=Charts::Discovered ${count} chart(s)"
+
+      - name: Lint charts
+        if: inputs.helm-lint
+        env:
+          CHARTS: ${{ steps.discover.outputs.charts }}
+          DEPENDENCY_BUILD: ${{ inputs.dependency-build }}
+          LINT_STRICT: ${{ inputs.lint-strict }}
+          LINT_VALUES: ${{ inputs.lint-values-files }}
+          LINT_ARGS: ${{ inputs.lint-args }}
+        run: |
+          set -euo pipefail
+
+          lint_args=()
+          [ "$LINT_STRICT" = "true" ] && lint_args+=(--strict)
+          while IFS= read -r vf; do
+            vf="${vf#"${vf%%[![:space:]]*}"}"; vf="${vf%"${vf##*[![:space:]]}"}"
+            [ -n "$vf" ] || continue
+            lint_args+=(--values "$vf")
+          done <<< "$LINT_VALUES"
+          read -ra extra_args <<< "$LINT_ARGS"
+
+          failed=0
+          rows=""
+          while IFS= read -r chart; do
+            [ -n "$chart" ] || continue
+
+            # An umbrella chart cannot lint until its subcharts are present.
+            if [ "$DEPENDENCY_BUILD" = "true" ] && grep -q '^dependencies:' "${chart}/Chart.yaml"; then
+              echo "::group::helm dependency (${chart})"
+              if [ -f "${chart}/Chart.lock" ]; then
+                helm dependency build "$chart"
+              else
+                echo "::notice title=No Chart.lock::${chart} has dependencies but no lock file — running 'helm dependency update'"
+                helm dependency update "$chart"
+              fi
+              echo "::endgroup::"
+            fi
+
+            echo "::group::helm lint ${chart}"
+            if helm lint "$chart" "${lint_args[@]}" "${extra_args[@]}"; then
+              rows+="| \`${chart}\` | :white_check_mark: |"$'\n'
+            else
+              echo "::error file=${chart}/Chart.yaml,title=helm lint failed::${chart} did not pass helm lint"
+              rows+="| \`${chart}\` | :x: |"$'\n'
+              failed=1
+            fi
+            echo "::endgroup::"
+          done <<< "$CHARTS"
+
+          {
+            echo "### Helm lint"
+            echo ""
+            echo "| Chart | Result |"
+            echo "| --- | --- |"
+            printf '%s' "$rows"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$failed"
+
+  render:
+    name: Helm template and schema validation
+    needs: lint
+    if: inputs.render-charts != ''
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    outputs:
+      rendered-count: ${{ steps.render.outputs.rendered-count }}
+      artifact-name: ${{ steps.artifact-name.outputs.name }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: ${{ startsWith(inputs.helm-version, 'v') && inputs.helm-version || format('v{0}', inputs.helm-version) }}
+
+      - name: Setup kubeconform
+        if: inputs.validate
+        uses: fluxcd/pkg/actions/kubeconform@827f6c319fb09577b6243e95b6c07dffe53bb6f3
+        with:
+          version: ${{ inputs.kubeconform-version }}
+
+      # The render logic is inlined rather than calling actions/helm-render:
+      # a relative `uses:` inside a reusable workflow resolves against the
+      # caller repo, not this one. See CONTRIBUTING.md. Consumers that want the
+      # step on its own use
+      # ianoflynnautomation/bjjeire-ci-templates/actions/helm-render@v1.
+      - name: Render charts
+        id: render
+        env:
+          CHART_PATHS: ${{ inputs.render-charts }}
+          OUTPUT_DIR: ${{ inputs.output-dir }}
+          RELEASE_NAME: ${{ inputs.release-name }}
+          NAMESPACE: ${{ inputs.namespace }}
+          VALUES_FILES: ${{ inputs.values-files }}
+          SET_VALUES: ${{ inputs.set-values }}
+          SET_STRING_VALUES: ${{ inputs.set-string-values }}
+          INCLUDE_CRDS: ${{ inputs.include-crds }}
+          DEPENDENCY_BUILD: ${{ inputs.dependency-build }}
+          EXTRA_ARGS: ${{ inputs.template-args }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT_DIR"
+
+          common_args=()
+          [ -n "$NAMESPACE" ] && common_args+=(--namespace "$NAMESPACE")
+          [ "$INCLUDE_CRDS" = "true" ] && common_args+=(--include-crds)
+
+          while IFS= read -r vf; do
+            vf="${vf#"${vf%%[![:space:]]*}"}"; vf="${vf%"${vf##*[![:space:]]}"}"
+            [ -n "$vf" ] || continue
+            if [ ! -f "$vf" ]; then
+              echo "::error title=Missing values file::${vf} does not exist"
+              exit 1
+            fi
+            common_args+=(--values "$vf")
+          done <<< "$VALUES_FILES"
+
+          while IFS= read -r kv; do
+            kv="${kv#"${kv%%[![:space:]]*}"}"; kv="${kv%"${kv##*[![:space:]]}"}"
+            [ -n "$kv" ] || continue
+            common_args+=(--set "$kv")
+          done <<< "$SET_VALUES"
+
+          while IFS= read -r kv; do
+            kv="${kv#"${kv%%[![:space:]]*}"}"; kv="${kv%"${kv##*[![:space:]]}"}"
+            [ -n "$kv" ] || continue
+            common_args+=(--set-string "$kv")
+          done <<< "$SET_STRING_VALUES"
+
+          read -ra extra_args <<< "$EXTRA_ARGS"
+
+          rendered=0
+          skipped=0
+          rows=""
+          shopt -s nullglob
+
+          while IFS= read -r pattern; do
+            pattern="${pattern#"${pattern%%[![:space:]]*}"}"; pattern="${pattern%"${pattern##*[![:space:]]}"}"
+            [ -n "$pattern" ] || continue
+
+            matched=0
+            # Unquoted on purpose: applies glob expansion to the caller pattern.
+            # shellcheck disable=SC2086
+            for dir in $pattern; do
+              matched=1
+              if [ ! -d "$dir" ] || [ ! -f "${dir}/Chart.yaml" ]; then
+                echo "::warning title=Not a chart::${dir} has no Chart.yaml — skipping"
+                skipped=$((skipped + 1))
+                rows+="| \`${dir}\` | — | skipped (no Chart.yaml) |"$'\n'
+                continue
+              fi
+
+              chart_name="$(awk '/^name:[[:space:]]/ {sub(/^name:[[:space:]]*/, ""); gsub(/["'"'"']/, ""); print; exit}' "${dir}/Chart.yaml")"
+              name="${RELEASE_NAME:-$chart_name}"
+              if [ -z "$name" ]; then
+                echo "::error file=${dir}/Chart.yaml,title=Unnamed chart::Chart.yaml has no top-level 'name' and no release-name was supplied"
+                exit 1
+              fi
+
+              if [ "$DEPENDENCY_BUILD" = "true" ] && grep -q '^dependencies:' "${dir}/Chart.yaml"; then
+                echo "::group::helm dependency (${dir})"
+                if [ -f "${dir}/Chart.lock" ]; then
+                  helm dependency build "$dir"
+                else
+                  helm dependency update "$dir"
+                fi
+                echo "::endgroup::"
+              fi
+
+              slug="${dir#./}"; slug="${slug%/}"; slug="${slug//\//-}"
+              out="${OUTPUT_DIR}/${slug}.yaml"
+
+              echo "::group::helm template ${name} ${dir}"
+              helm template "$name" "$dir" "${common_args[@]}" "${extra_args[@]}" > "$out"
+              echo "::endgroup::"
+
+              rendered=$((rendered + 1))
+              rows+="| \`${dir}\` | \`${chart_name}\` | \`${out}\` |"$'\n'
+            done
+
+            if [ "$matched" -eq 0 ]; then
+              echo "::warning title=No match::Pattern '${pattern}' matched nothing"
+              rows+="| \`${pattern}\` | — | no match |"$'\n'
+            fi
+          done <<< "$CHART_PATHS"
+
+          echo "rendered-count=${rendered}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Helm template"
+            echo ""
+            echo "| Chart path | Chart | Output |"
+            echo "| --- | --- | --- |"
+            printf '%s' "$rows"
+            echo ""
+            echo "Rendered **${rendered}**, skipped **${skipped}**."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$rendered" -eq 0 ]; then
+            echo "::error title=Nothing rendered::No path in 'render-charts' produced output — check the patterns"
+            exit 1
+          fi
+
+      - name: Validate with kubeconform
+        if: inputs.validate
+        env:
+          OUTPUT_DIR: ${{ inputs.output-dir }}
+          KUBERNETES_VERSION: ${{ inputs.kubernetes-version }}
+          STRICT: ${{ inputs.strict }}
+          IGNORE_MISSING: ${{ inputs.ignore-missing-schemas }}
+          SCHEMA_LOCATIONS: ${{ inputs.schema-locations }}
+          SKIP_KINDS: ${{ inputs.skip-kinds }}
+        run: |
+          set -euo pipefail
+          args=(-kubernetes-version "$KUBERNETES_VERSION" -summary)
+          if [ "$STRICT" = "true" ]; then args+=(-strict); fi
+          if [ "$IGNORE_MISSING" = "true" ]; then args+=(-ignore-missing-schemas); fi
+          if [ -n "$SKIP_KINDS" ]; then args+=(-skip "$SKIP_KINDS"); fi
+          while IFS= read -r loc; do
+            loc="${loc#"${loc%%[![:space:]]*}"}"; loc="${loc%"${loc##*[![:space:]]}"}"
+            [ -n "$loc" ] || continue
+            args+=(-schema-location "$loc")
+          done <<< "$SCHEMA_LOCATIONS"
+
+          failed=0
+          echo "::group::kubeconform"
+          for file in "${OUTPUT_DIR}"/*.yaml; do
+            echo "Validating ${file}"
+            if ! kubeconform "${args[@]}" "$file"; then
+              echo "::error file=${file},title=Schema validation failed::${file} does not validate against Kubernetes ${KUBERNETES_VERSION}"
+              failed=1
+            fi
+          done
+          echo "::endgroup::"
+
+          {
+            echo "### kubeconform"
+            echo ""
+            if [ "$failed" -eq 0 ]; then
+              echo "All rendered manifests validate against Kubernetes \`${KUBERNETES_VERSION}\`. :white_check_mark:"
+            else
+              echo "Schema validation failed — see annotations above. :x:"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$failed"
+
+      - name: Resolve artifact name
+        id: artifact-name
+        env:
+          ARTIFACT_NAME: ${{ inputs.upload-artifact && inputs.artifact-name || '' }}
+        run: echo "name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload rendered manifests
+        if: inputs.upload-artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.output-dir }}/
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact-retention-days }}
