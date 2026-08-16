@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.2.0...v1.3.0) (2026-08-16)
+
+
+### Features
+
+* add deploy reusable workflows ([046fdfb](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/046fdfb8b8cc8089d48039de5f73737da730a1d2))
+* add release workflows ([ececaf8](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/ececaf89afc16d8e5a66c95ccced5c7a76c6b48b))
+
 ## [1.2.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.1.0...v1.2.0) (2026-08-16)
 
 
