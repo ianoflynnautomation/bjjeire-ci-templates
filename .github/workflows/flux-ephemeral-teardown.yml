@@ -80,7 +80,7 @@ jobs:
       namespace: ${{ steps.del.outputs.namespace }}
     steps:
       - name: Log in to AKS
-        uses: ianoflynnautomation/bjjeire-ci-templates/actions/azure-aks-login@c6f59b274994c0819cc0aecda3329fdd2c8698d7  # v1.1.0
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/azure-aks-login@f51b5ef3b6c34b56452d6bec29337e9d4240b078  # v1.3.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
