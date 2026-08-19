@@ -1,0 +1,348 @@
+name: Acceptance Gate (Reusable)
+
+# Orchestrates deploy → test → teardown for an environment that may be
+# ephemeral (create/destroy via Flux sha-env) or already exist (tests only).
+#
+# Required caller permissions (superset of every job below — GitHub rejects
+# the run at parse time if the caller grants less):
+#   contents: read
+#   actions: read
+#   packages: read        # playwright-tests, private runner image
+#   id-token: write
+#   pages: write          # playwright-tests validates the tree even when publish-report is false
+#
+# No top-level concurrency — put it on the caller only.
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "ephemeral (create → test → destroy) | existing (tests only)."
+        type: string
+        required: false
+        default: "ephemeral"
+      env-id:
+        description: "Environment / namespace id. Required when mode=ephemeral."
+        type: string
+        required: false
+        default: ""
+      image-tag:
+        description: "Container tag for api/frontend/seeder. Required when mode=ephemeral."
+        type: string
+        required: false
+        default: ""
+      cluster-resource-group:
+        description: "Azure RG containing the AKS cluster. Required when mode=ephemeral."
+        type: string
+        required: false
+        default: ""
+      cluster-name:
+        description: "AKS cluster name. Required when mode=ephemeral."
+        type: string
+        required: false
+        default: ""
+      cluster-domain:
+        description: "Per-cluster DNS suffix (e.g. dev.bjjeire.com). Public hosts nest under this."
+        type: string
+        required: false
+        default: ""
+      gitops-repo:
+        description: "Owner/repo holding the sha-env manifests."
+        type: string
+        required: false
+        default: "ianoflynnautomation/bjjeire-gitops"
+      gitops-ref:
+        description: "Git ref of the gitops repo."
+        type: string
+        required: false
+        default: "main"
+      sha-env-path:
+        description: "Repo-relative path to the envsubst SHA-env manifest."
+        type: string
+        required: false
+        default: "kubernetes/apps/base/bjj-eire-preview/sha-env/manifests.yaml"
+      values-path:
+        description: "Repo-relative path to the ephemeral Helm values file (becomes a ConfigMap)."
+        type: string
+        required: false
+        default: "kubernetes/apps/base/bjj-eire-preview/controller/values-ephemeral.yaml"
+      base-url:
+        description: "Frontend URL when mode=existing. Ignored for ephemeral (taken from env_up)."
+        type: string
+        required: false
+        default: ""
+      api-url:
+        description: "API URL when mode=existing. Ignored for ephemeral (taken from env_up)."
+        type: string
+        required: false
+        default: ""
+      test-tags:
+        description: "Playwright grep filter."
+        type: string
+        required: false
+        default: "@acceptance"
+      shard-total:
+        description: "Default number of parallel shards per Playwright project."
+        type: number
+        required: false
+        default: 8
+      playwright-projects:
+        description: "Newline-separated Playwright project names."
+        type: string
+        required: false
+        default: |
+          api
+          chromium-desktop
+          firefox-desktop
+          webkit-desktop
+          chromium-wide
+      keep-on-failure:
+        description: "When true (default), a failed suite leaves the ephemeral namespace for debugging (TTL janitor is the backstop)."
+        type: boolean
+        required: false
+        default: true
+      ttl:
+        description: "Janitor TTL annotation applied to the ephemeral namespace."
+        type: string
+        required: false
+        default: "4h"
+      test-repo:
+        description: "Owner/repo holding the test code."
+        type: string
+        required: false
+        default: "ianoflynnautomation/bjjeire-tests"
+      test-repo-ref:
+        description: "Git ref of the test repo to check out."
+        type: string
+        required: false
+        default: "main"
+      runs-on:
+        description: "Runner label for env lifecycle + Playwright shards."
+        type: string
+        required: false
+        default: "gha-runner-scale-set"
+      report-runs-on:
+        description: "Runner label for report merge / gate jobs."
+        type: string
+        required: false
+        default: "ubuntu-latest"
+      fail-on-flaky:
+        description: "Fail the suite when any test passed only after a retry."
+        type: boolean
+        required: false
+        default: true
+      publish-report:
+        description: "Publish the merged HTML report to GitHub Pages."
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_SUBSCRIPTION_ID:
+        required: false
+      GHCR_TOKEN:
+        required: false
+      test-env-vars:
+        required: false
+    outputs:
+      test-status:
+        description: "success | failure — result of the tests job."
+        value: ${{ jobs.tests.outputs.status }}
+      namespace:
+        description: "Kubernetes namespace the env was deployed into."
+        value: ${{ jobs.env_up.outputs.namespace }}
+      failed-count:
+        description: "Number of failed tests across all shards (0 on green)."
+        value: ${{ jobs.tests.outputs.failed-count }}
+      report-artifact-name:
+        description: "Name of the merged HTML report artifact."
+        value: ${{ jobs.tests.outputs.report-artifact-name }}
+
+permissions:
+  contents: read
+  id-token: write
+  actions: read
+
+jobs:
+  env_up:
+    name: Deploy acceptance env
+    if: inputs.mode == 'ephemeral'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      base_url: ${{ steps.wait.outputs.base-url }}
+      api_base_url: ${{ steps.wait.outputs.api-url }}
+      internal_api_url: ${{ steps.wait.outputs.internal-api-url }}
+      namespace: ${{ steps.wait.outputs.namespace }}
+    steps:
+      - name: Checkout gitops
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.gitops-repo }}
+          ref: ${{ inputs.gitops-ref }}
+          persist-credentials: false
+
+      - name: Log in to AKS
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/azure-aks-login@c6f59b274994c0819cc0aecda3329fdd2c8698d7  # v1.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          resource-group: ${{ inputs.cluster-resource-group }}
+          cluster-name: ${{ inputs.cluster-name }}
+          install-helm: "false"
+
+      - name: Apply SHA-env manifests
+        env:
+          ENV_ID: ${{ inputs.env-id }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
+          CLUSTER_DOMAIN: ${{ inputs.cluster-domain }}
+          TTL: ${{ inputs.ttl }}
+          MANIFEST: ${{ inputs.sha-env-path }}
+          VALUES: ${{ inputs.values-path }}
+          GITOPS_REPO: ${{ inputs.gitops-repo }}
+          GITOPS_REF: ${{ inputs.gitops-ref }}
+        run: |
+          set -euo pipefail
+          : "${ENV_ID:?}" "${IMAGE_TAG:?}" "${CLUSTER_DOMAIN:?}" "${TTL:?}"
+          if [ ! -f "${MANIFEST}" ]; then
+            echo "::error title=Missing manifest::${MANIFEST} not in ${GITOPS_REPO}@${GITOPS_REF}"
+            exit 1
+          fi
+          if [ ! -f "${VALUES}" ]; then
+            echo "::error title=Missing values::${VALUES} not in ${GITOPS_REPO}@${GITOPS_REF}"
+            exit 1
+          fi
+          render() {
+            python3 -c '
+          import os, pathlib, sys
+          text = pathlib.Path(sys.argv[1]).read_text()
+          for key in ("ENV_ID", "IMAGE_TAG", "CLUSTER_DOMAIN", "TTL"):
+              text = text.replace("$" + "{" + key + "}", os.environ[key])
+          sys.stdout.write(text)
+          ' "$1"
+          }
+          echo "::group::rendered sha-env"
+          render "${MANIFEST}"
+          echo "::endgroup::"
+          render "${MANIFEST}" | kubectl apply --server-side --field-manager=gha -f -
+          kubectl wait "namespace/${ENV_ID}" --for=jsonpath='{.status.phase}'=Active --timeout=30s
+          kubectl -n "${ENV_ID}" create configmap bjj-eire-ephemeral-values \
+            --from-file=values.yaml="${VALUES}" \
+            --dry-run=client -o yaml \
+            | kubectl apply --server-side --field-manager=gha -f -
+
+      - name: Wait for HelmRelease
+        id: wait
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/flux-wait-helmrelease@main  # pin SHA after templates PR merges
+        with:
+          namespace: ${{ inputs.env-id }}
+          name: bjj-eire
+          timeout: 10m
+          cluster-domain: ${{ inputs.cluster-domain }}
+          env-id: ${{ inputs.env-id }}
+
+      - name: Collect diagnostics
+        if: failure()
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/collect-k8s-diagnostics@main  # pin SHA after templates PR merges
+        with:
+          namespace: ${{ inputs.env-id }}
+          helm-release: bjj-eire
+          flux-helmrelease: bjj-eire
+          upload-artifact: "true"
+          artifact-name: k8s-diagnostics-${{ inputs.env-id }}
+
+  tests:
+    name: Run acceptance suite
+    needs: [env_up]
+    if: |
+      always() &&
+      (needs.env_up.result == 'success' ||
+       (inputs.mode == 'existing' && needs.env_up.result == 'skipped'))
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+      id-token: write
+      pages: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/playwright-tests.yml@cf8cd586a13d524028cdf41c72c2f502ac246722  # v1.2.0
+    with:
+      app-env: staging
+      base-url: ${{ inputs.mode == 'existing' && inputs.base-url || needs.env_up.outputs.base_url }}
+      api-url: ${{ inputs.mode == 'existing' && inputs.api-url || needs.env_up.outputs.api_base_url }}
+      test-repo: ${{ inputs.test-repo }}
+      test-repo-ref: ${{ inputs.test-repo-ref }}
+      test-tags: ${{ inputs.test-tags }}
+      shard-total: ${{ inputs.shard-total }}
+      playwright-projects: ${{ inputs.playwright-projects }}
+      config-map: |
+        api=playwright.api.config.ts
+      default-config: playwright.ui.config.ts
+      project-env-overrides: ${{ inputs.mode == 'ephemeral' && format('api:API_URL={0}\napi:CF_ACCESS_CLIENT_ID=\napi:CF_ACCESS_CLIENT_SECRET=', needs.env_up.outputs.internal_api_url) || '' }}
+      runs-on: ${{ inputs.runs-on }}
+      report-runs-on: ${{ inputs.report-runs-on }}
+      fail-on-flaky: ${{ inputs.fail-on-flaky }}
+      publish-report: ${{ inputs.publish-report }}
+    secrets:
+      test-env-vars: ${{ secrets.test-env-vars }}
+
+  env_down:
+    name: Destroy acceptance env
+    needs: [env_up, tests]
+    if: |
+      always() &&
+      inputs.mode == 'ephemeral' &&
+      needs.env_up.result == 'success' &&
+      (needs.tests.result == 'success' || inputs.keep-on-failure == false)
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/flux-ephemeral-teardown.yml@main  # pin SHA after templates PR merges
+    with:
+      env-id: ${{ inputs.env-id }}
+      cluster-resource-group: ${{ inputs.cluster-resource-group }}
+      cluster-name: ${{ inputs.cluster-name }}
+      helm-release: bjj-eire
+      flux-helmrelease: bjj-eire
+      runs-on: ${{ inputs.runs-on }}
+    secrets: inherit
+
+  gate:
+    name: Acceptance gate
+    runs-on: ${{ inputs.report-runs-on }}
+    timeout-minutes: 5
+    needs: [env_up, tests, env_down]
+    if: always()
+    steps:
+      - name: Evaluate result
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          ENV_UP: ${{ needs.env_up.result }}
+          TESTS: ${{ needs.tests.result }}
+          ENV_DOWN: ${{ needs.env_down.result }}
+          ENV_ID: ${{ inputs.env-id }}
+          TTL: ${{ inputs.ttl }}
+          KEEP: ${{ inputs.keep-on-failure }}
+        run: |
+          set -euo pipefail
+          echo "mode=${MODE} env_up=${ENV_UP} tests=${TESTS} env_down=${ENV_DOWN}"
+          if [ "${MODE}" = "ephemeral" ] && [ "${ENV_UP}" != "success" ]; then
+            echo "::error title=Acceptance failed::env_up did not succeed"
+            exit 1
+          fi
+          if [ "${TESTS}" != "success" ]; then
+            if [ "${MODE}" = "ephemeral" ]; then
+              echo "::error title=Acceptance failed::tests did not pass — namespace ${ENV_ID} kept alive (TTL ${TTL}, keep-on-failure=${KEEP}). Re-run failed jobs retries against the same env; or push a fix for a fresh one."
+            else
+              echo "::error title=Acceptance failed::tests did not pass against the existing environment"
+            fi
+            exit 1
+          fi
+          if [ "${ENV_DOWN}" = "failure" ]; then
+            echo "::warning title=Teardown failed::destroy ran but failed for ${ENV_ID} — TTL janitor will reap the namespace within ${TTL}"
+          fi
+          echo "::notice title=Acceptance gate::PASS"

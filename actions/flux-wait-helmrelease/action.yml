@@ -1,0 +1,138 @@
+name: 'Flux Wait HelmRelease'
+description: >-
+  Waits until a Flux HelmRelease reports Ready=True, then emits the public and
+  in-cluster URLs for the environment. Assumes kubectl (and optionally flux)
+  are already on PATH — run azure-aks-login first. Does not install tools and
+  does not authenticate.
+
+inputs:
+  namespace:
+    description: 'Namespace that holds the HelmRelease (usually the env id).'
+    required: true
+  name:
+    description: 'HelmRelease name.'
+    required: false
+    default: 'bjj-eire'
+  timeout:
+    description: 'kubectl wait timeout (Go duration, e.g. 10m).'
+    required: false
+    default: '10m'
+  cluster-domain:
+    description: 'DNS suffix used to compose public URLs (e.g. dev.bjjeire.com). Empty skips URL outputs.'
+    required: false
+    default: ''
+  env-id:
+    description: 'Hostname prefix. Empty defaults to namespace.'
+    required: false
+    default: ''
+  api-service:
+    description: 'In-cluster API Service name used for internal-api-url.'
+    required: false
+    default: 'bjj-api'
+  api-port:
+    description: 'In-cluster API Service port.'
+    required: false
+    default: '8080'
+  summary-title:
+    description: 'Heading used in the step summary. Empty skips the summary.'
+    required: false
+    default: 'HelmRelease ready'
+
+outputs:
+  ready:
+    description: '"true" when the HelmRelease became Ready within the timeout.'
+    value: ${{ steps.wait.outputs.ready }}
+  namespace:
+    description: 'Namespace that was waited on.'
+    value: ${{ steps.wait.outputs.namespace }}
+  base-url:
+    description: 'https://<env-id>.<cluster-domain>. Empty when cluster-domain is unset.'
+    value: ${{ steps.wait.outputs.base-url }}
+  api-url:
+    description: 'https://api-<env-id>.<cluster-domain>. Empty when cluster-domain is unset.'
+    value: ${{ steps.wait.outputs.api-url }}
+  internal-api-url:
+    description: 'http://<api-service>.<namespace>.svc.cluster.local:<api-port>'
+    value: ${{ steps.wait.outputs.internal-api-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Wait for HelmRelease Ready
+      id: wait
+      shell: bash
+      env:
+        NS: ${{ inputs.namespace }}
+        NAME: ${{ inputs.name }}
+        TIMEOUT: ${{ inputs.timeout }}
+        CLUSTER_DOMAIN: ${{ inputs.cluster-domain }}
+        ENV_ID: ${{ inputs.env-id }}
+        API_SERVICE: ${{ inputs.api-service }}
+        API_PORT: ${{ inputs.api-port }}
+      run: |
+        set -euo pipefail
+        if [ -z "${NS}" ]; then
+          echo "::error title=HelmRelease wait::namespace input is empty"
+          exit 1
+        fi
+        if ! command -v kubectl >/dev/null 2>&1; then
+          echo "::error title=HelmRelease wait::kubectl is not on PATH — run azure-aks-login (or setup-kubernetes-tools) first"
+          exit 1
+        fi
+        env_id="${ENV_ID:-$NS}"
+        echo "::group::Waiting for helmrelease/${NAME} in ${NS} (timeout ${TIMEOUT})"
+        if ! kubectl -n "${NS}" wait helmrelease/"${NAME}" \
+          --for=condition=Ready \
+          --timeout="${TIMEOUT}"; then
+          echo "::endgroup::"
+          echo "::error title=HelmRelease not ready::${NS}/${NAME} did not become Ready within ${TIMEOUT}"
+          if command -v flux >/dev/null 2>&1; then
+            echo "::group::flux get helmrelease"
+            flux -n "${NS}" get helmrelease "${NAME}" || true
+            echo "::endgroup::"
+          fi
+          kubectl -n "${NS}" describe helmrelease "${NAME}" || true
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+        echo "::endgroup::"
+
+        base_url=""
+        api_url=""
+        if [ -n "${CLUSTER_DOMAIN}" ]; then
+          base_url="https://${env_id}.${CLUSTER_DOMAIN}"
+          api_url="https://api-${env_id}.${CLUSTER_DOMAIN}"
+        fi
+        internal="http://${API_SERVICE}.${NS}.svc.cluster.local:${API_PORT}"
+        {
+          echo "ready=true"
+          echo "namespace=${NS}"
+          echo "base-url=${base_url}"
+          echo "api-url=${api_url}"
+          echo "internal-api-url=${internal}"
+        } >> "$GITHUB_OUTPUT"
+        echo "::notice title=HelmRelease ready::${NS}/${NAME} Ready (frontend=${base_url:-n/a}, api=${api_url:-n/a}, internal=${internal})"
+
+    - name: Write summary
+      if: always() && inputs.summary-title != ''
+      shell: bash
+      env:
+        TITLE: ${{ inputs.summary-title }}
+        NS: ${{ inputs.namespace }}
+        NAME: ${{ inputs.name }}
+        READY: ${{ steps.wait.outputs.ready }}
+        BASE: ${{ steps.wait.outputs.base-url }}
+        API: ${{ steps.wait.outputs.api-url }}
+        INTERNAL: ${{ steps.wait.outputs.internal-api-url }}
+      run: |
+        {
+          echo "### ${TITLE}"
+          echo ""
+          echo "| Field | Value |"
+          echo "| --- | --- |"
+          echo "| HelmRelease | \`${NS}/${NAME}\` |"
+          echo "| Ready | ${READY:-false} |"
+          echo "| Frontend | ${BASE:-n/a} |"
+          echo "| API | ${API:-n/a} |"
+          echo "| Internal API | \`${INTERNAL:-n/a}\` |"
+        } >> "$GITHUB_STEP_SUMMARY"

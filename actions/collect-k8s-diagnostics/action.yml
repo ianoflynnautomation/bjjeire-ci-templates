@@ -1,0 +1,131 @@
+name: 'Collect Kubernetes Diagnostics'
+description: >-
+  Dumps namespace events, pod status, recent container logs, and (when the
+  binaries exist) helm status / flux get. Intended for `if: failure()` after
+  a deploy or wait step. Assumes kubectl is already on PATH.
+
+inputs:
+  namespace:
+    description: 'Namespace to inspect.'
+    required: true
+  helm-release:
+    description: 'Optional Helm release name to run `helm status` against.'
+    required: false
+    default: ''
+  flux-helmrelease:
+    description: 'Optional Flux HelmRelease name to run `flux get helmrelease` against.'
+    required: false
+    default: ''
+  log-tail:
+    description: 'Lines of log to take from each container.'
+    required: false
+    default: '200'
+  event-tail:
+    description: 'Number of most-recent events to print.'
+    required: false
+    default: '50'
+  upload-artifact:
+    description: 'When "true", upload the dump directory as a workflow artifact.'
+    required: false
+    default: 'false'
+  artifact-name:
+    description: 'Artifact name used when upload-artifact is true.'
+    required: false
+    default: 'k8s-diagnostics'
+  artifact-retention-days:
+    description: 'Retention in days for the diagnostics artifact.'
+    required: false
+    default: '7'
+  summary-title:
+    description: 'Heading used in the step summary. Empty skips the summary.'
+    required: false
+    default: 'Kubernetes diagnostics'
+
+outputs:
+  dump-dir:
+    description: 'Directory the dump was written to.'
+    value: ${{ steps.dump.outputs.dump-dir }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Dump namespace diagnostics
+      id: dump
+      shell: bash
+      env:
+        NS: ${{ inputs.namespace }}
+        HELM_RELEASE: ${{ inputs.helm-release }}
+        FLUX_HR: ${{ inputs.flux-helmrelease }}
+        LOG_TAIL: ${{ inputs.log-tail }}
+        EVENT_TAIL: ${{ inputs.event-tail }}
+      run: |
+        set -uo pipefail
+        if [ -z "${NS}" ]; then
+          echo "::error title=Diagnostics::namespace input is empty"
+          exit 1
+        fi
+        if ! command -v kubectl >/dev/null 2>&1; then
+          echo "::error title=Diagnostics::kubectl is not on PATH"
+          exit 1
+        fi
+
+        dump="${RUNNER_TEMP:-/tmp}/k8s-diagnostics-${NS}"
+        mkdir -p "$dump"
+        echo "dump-dir=${dump}" >> "$GITHUB_OUTPUT"
+
+        echo "::group::namespace events"
+        kubectl -n "${NS}" get events --sort-by=.lastTimestamp 2>"$dump/events.err" \
+          | tee "$dump/events.txt" | tail -n "${EVENT_TAIL}" || true
+        echo "::endgroup::"
+
+        echo "::group::pod status"
+        kubectl -n "${NS}" get pods -o wide 2>"$dump/pods.err" \
+          | tee "$dump/pods.txt" || true
+        echo "::endgroup::"
+
+        echo "::group::recent pod logs"
+        for pod in $(kubectl -n "${NS}" get pods -o name 2>/dev/null); do
+          echo "--- ${pod} ---"
+          kubectl -n "${NS}" logs "${pod}" --all-containers --tail="${LOG_TAIL}" \
+            | tee -a "$dump/logs.txt" || true
+        done
+        echo "::endgroup::"
+
+        if [ -n "${HELM_RELEASE}" ] && command -v helm >/dev/null 2>&1; then
+          echo "::group::helm status ${HELM_RELEASE}"
+          helm status "${HELM_RELEASE}" --namespace "${NS}" \
+            | tee "$dump/helm-status.txt" || true
+          echo "::endgroup::"
+        fi
+
+        if [ -n "${FLUX_HR}" ] && command -v flux >/dev/null 2>&1; then
+          echo "::group::flux get helmrelease ${FLUX_HR}"
+          flux -n "${NS}" get helmrelease "${FLUX_HR}" \
+            | tee "$dump/flux-helmrelease.txt" || true
+          echo "::endgroup::"
+        fi
+
+        echo "::notice title=Diagnostics collected::wrote ${dump} for namespace ${NS}"
+
+    - name: Upload diagnostics artifact
+      if: inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.dump.outputs.dump-dir }}
+        if-no-files-found: warn
+        retention-days: ${{ inputs.artifact-retention-days }}
+
+    - name: Write summary
+      if: always() && inputs.summary-title != ''
+      shell: bash
+      env:
+        TITLE: ${{ inputs.summary-title }}
+        NS: ${{ inputs.namespace }}
+        DUMP: ${{ steps.dump.outputs.dump-dir }}
+      run: |
+        {
+          echo "### ${TITLE}"
+          echo ""
+          echo "Namespace \`${NS}\` dump: \`${DUMP:-n/a}\`"
+        } >> "$GITHUB_STEP_SUMMARY"

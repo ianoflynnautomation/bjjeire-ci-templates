@@ -14,6 +14,8 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`playwright-tests.yml`](.github/workflows/playwright-tests.yml) | Sharded Playwright run against an environment that already exists — plans the matrix, runs shards, merges and gates |
 | [`playwright-docker-tests.yml`](.github/workflows/playwright-docker-tests.yml) | Sharded Playwright run that provisions its own Docker Compose stack per shard, plus a sticky PR result comment |
 | [`playwright-report.yml`](.github/workflows/playwright-report.yml) | Shared tail for any sharded Playwright run: merge blob reports, summarise counts, publish to Pages, gate on failures/flakes |
+| [`acceptance-gate.yml`](.github/workflows/acceptance-gate.yml) | Deploy → test → teardown orchestrator. `mode: ephemeral` applies gitops sha-env + waits for the Flux HelmRelease; `mode: existing` runs the same suite against URLs you pass in |
+| [`flux-ephemeral-teardown.yml`](.github/workflows/flux-ephemeral-teardown.yml) | Label-guarded destroy of an ephemeral namespace (Helm uninstall + optional Flux HelmRelease delete + namespace delete) |
 | [`docker-build-push.yml`](.github/workflows/docker-build-push.yml) | Multi-arch buildx build with GHA cache, SBOM + provenance attestation, cosign keyless signing, Trivy scan → code scanning |
 | [`security-scan.yml`](.github/workflows/security-scan.yml) | Dependency review + gitleaks secret scan + Semgrep SAST, each independently toggleable |
 | [`terraform-quality.yml`](.github/workflows/terraform-quality.yml) | Credential-free tier: fmt + backend-less validate + tflint (root and per-module), sticky PR comment, per-check gate. Runs on fork PRs |
@@ -39,6 +41,8 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`actions/setup-java-cached`](actions/setup-java-cached/action.yml) | JDK install + Maven/Gradle dependency cache; `install-jdk: false` restores only the cache in container-first jobs |
 | [`actions/azure-aks-login`](actions/azure-aks-login/action.yml) | Azure OIDC login → kubelogin/kubectl/helm → AKS kubeconfig, with a reachability check |
 | [`actions/wait-for-http`](actions/wait-for-http/action.yml) | Poll a URL until it answers an accepted status class; falls back to python3 on images without curl |
+| [`actions/flux-wait-helmrelease`](actions/flux-wait-helmrelease/action.yml) | Wait until a Flux HelmRelease is Ready, then emit public and in-cluster URLs |
+| [`actions/collect-k8s-diagnostics`](actions/collect-k8s-diagnostics/action.yml) | Dump events, pod status, logs, and optional helm/flux status; intended for `if: failure()` |
 | [`actions/playwright-plan-matrix`](actions/playwright-plan-matrix/action.yml) | Expand Playwright projects × shards into a flat matrix, with per-project shard and config overrides |
 | [`actions/dotnet-run-tests`](actions/dotnet-run-tests/action.yml) | Single test project with TRX output + artifact upload |
 | [`actions/detect-changes`](actions/detect-changes/action.yml) | Evaluate caller-supplied path filters; emits a `changes` JSON array + summary. Filters stay in the caller |

@@ -1,0 +1,87 @@
+# Example caller: run the acceptance gate against an ephemeral AKS namespace
+# (create → test → destroy) or against an environment that already exists.
+#
+# Copy into the app repo as a job in ci-main.yml (ephemeral) or a dedicated
+# nightly workflow (existing). Pin the reusable workflow to a SHA after the
+# templates PR merges.
+name: Acceptance
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "ephemeral | existing"
+        type: choice
+        options: [ephemeral, existing]
+        default: existing
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance_ephemeral:
+    name: Acceptance (AKS ephemeral)
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+      id-token: write
+      pages: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/acceptance-gate.yml@v1
+    with:
+      mode: ephemeral
+      env-id: sha-${{ github.run_id }}
+      image-tag: ${{ github.sha }}
+      cluster-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+      cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+      cluster-domain: ${{ vars.AKS_CLUSTER_DOMAIN }}
+      test-tags: "@acceptance"
+      shard-total: 8
+      keep-on-failure: true
+      runs-on: gha-runner-scale-set
+      report-runs-on: ubuntu-latest
+    secrets:
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      test-env-vars: |
+        AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}
+        AZURE_TESTS_CLIENT_ID=${{ secrets.AZURE_TESTS_CLIENT_ID }}
+        AZURE_API_SCOPE=${{ secrets.AZURE_API_SCOPE }}
+        AZURE_AUTHORITY=${{ secrets.AZURE_AUTHORITY }}
+        CF_ACCESS_CLIENT_ID=${{ secrets.CF_ACCESS_CLIENT_ID }}
+        CF_ACCESS_CLIENT_SECRET=${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        PW_TEST_USER=${{ secrets.PW_TEST_USER }}
+        PW_TEST_PASSWORD=${{ secrets.PW_TEST_PASSWORD }}
+
+  acceptance_existing:
+    name: Acceptance (staging)
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+      id-token: write
+      pages: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/acceptance-gate.yml@v1
+    with:
+      mode: existing
+      base-url: ${{ vars.STAGING_BASE_URL }}
+      api-url: ${{ vars.STAGING_API_URL }}
+      test-tags: "@acceptance"
+      fail-on-flaky: true
+      publish-report: true
+      runs-on: gha-runner-scale-set
+    secrets:
+      test-env-vars: |
+        AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}
+        AZURE_TESTS_CLIENT_ID=${{ secrets.AZURE_TESTS_CLIENT_ID }}
+        AZURE_API_SCOPE=${{ secrets.AZURE_API_SCOPE }}
+        AZURE_AUTHORITY=${{ secrets.AZURE_AUTHORITY }}
+        CF_ACCESS_CLIENT_ID=${{ secrets.CF_ACCESS_CLIENT_ID }}
+        CF_ACCESS_CLIENT_SECRET=${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        PW_TEST_USER=${{ secrets.PW_TEST_USER }}
+        PW_TEST_PASSWORD=${{ secrets.PW_TEST_PASSWORD }}

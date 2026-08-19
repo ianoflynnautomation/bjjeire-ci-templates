@@ -58,6 +58,14 @@ updates:
     schedule:
       interval: weekly
   - package-ecosystem: github-actions
+    directory: "/actions/flux-wait-helmrelease"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/actions/collect-k8s-diagnostics"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
     directory: "/actions/playwright-plan-matrix"
     schedule:
       interval: weekly

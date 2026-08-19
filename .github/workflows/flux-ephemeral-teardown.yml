@@ -1,0 +1,138 @@
+name: Flux Ephemeral Teardown (Reusable)
+
+# Deletes an ephemeral namespace (and optional Helm release / Flux HelmRelease)
+# after a label-guard check. Refuses to touch any namespace that is not marked
+# ephemeral, so a mistyped env-id cannot delete a long-lived environment.
+#
+# Required caller permissions:
+#   contents: read
+#   id-token: write
+
+on:
+  workflow_call:
+    inputs:
+      env-id:
+        description: "Namespace / environment id to destroy."
+        type: string
+        required: true
+      cluster-resource-group:
+        description: "Azure RG containing the AKS cluster."
+        type: string
+        required: true
+      cluster-name:
+        description: "AKS cluster name."
+        type: string
+        required: true
+      ephemeral-label:
+        description: "Label that must be present and equal to ephemeral-value."
+        type: string
+        required: false
+        default: "bjjeire.io/ephemeral"
+      ephemeral-value:
+        description: "Required value of ephemeral-label."
+        type: string
+        required: false
+        default: "true"
+      helm-release:
+        description: "Helm release to uninstall before deleting the namespace. Empty skips helm."
+        type: string
+        required: false
+        default: "bjj-eire"
+      flux-helmrelease:
+        description: "Flux HelmRelease to delete before the namespace. Empty skips it."
+        type: string
+        required: false
+        default: ""
+      wait-timeout:
+        description: "How long to wait for the namespace to terminate. 0 skips the wait."
+        type: string
+        required: false
+        default: "3m"
+      runs-on:
+        description: "Runner label. Override to land on an in-cluster pool for private API servers."
+        type: string
+        required: false
+        default: "ubuntu-latest"
+    secrets:
+      AZURE_TENANT_ID:
+        required: true
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+    outputs:
+      namespace:
+        description: "Namespace that was deleted (or already absent)."
+        value: ${{ jobs.destroy.outputs.namespace }}
+
+permissions:
+  contents: read
+
+jobs:
+  destroy:
+    name: Destroy ${{ inputs.env-id }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      namespace: ${{ steps.del.outputs.namespace }}
+    steps:
+      - name: Log in to AKS
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/azure-aks-login@c6f59b274994c0819cc0aecda3329fdd2c8698d7  # v1.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          resource-group: ${{ inputs.cluster-resource-group }}
+          cluster-name: ${{ inputs.cluster-name }}
+          install-helm: 'true'
+
+      - name: Delete ephemeral namespace
+        id: del
+        shell: bash
+        env:
+          NAMESPACE: ${{ inputs.env-id }}
+          LABEL: ${{ inputs.ephemeral-label }}
+          WANT: ${{ inputs.ephemeral-value }}
+          HELM_RELEASE: ${{ inputs.helm-release }}
+          FLUX_HR: ${{ inputs.flux-helmrelease }}
+          WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
+        run: |
+          set -euo pipefail
+          echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+
+          if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+            echo "::notice title=Nothing to destroy::namespace ${NAMESPACE} is not present"
+            exit 0
+          fi
+
+          # jsonpath cannot interpolate an arbitrary label key; fetch json and jq.
+          label=$(kubectl get namespace "${NAMESPACE}" -o json \
+            | jq -r --arg k "${LABEL}" '.metadata.labels[$k] // empty')
+          if [ "${label}" != "${WANT}" ]; then
+            echo "::error title=Refusing to destroy::namespace ${NAMESPACE} is missing ${LABEL}=${WANT} — refusing to delete"
+            exit 1
+          fi
+
+          if [ -n "${FLUX_HR}" ]; then
+            kubectl -n "${NAMESPACE}" delete helmrelease "${FLUX_HR}" --ignore-not-found
+          fi
+          if [ -n "${HELM_RELEASE}" ]; then
+            helm uninstall "${HELM_RELEASE}" --namespace "${NAMESPACE}" --ignore-not-found || true
+          fi
+
+          if [ "${WAIT_TIMEOUT}" = "0" ]; then
+            kubectl delete namespace "${NAMESPACE}" --wait=false
+            echo "::notice title=Env destroyed::${NAMESPACE} marked for deletion"
+            exit 0
+          fi
+
+          if ! kubectl delete namespace "${NAMESPACE}" --wait=true --timeout="${WAIT_TIMEOUT}"; then
+            echo "::warning title=Teardown timed out::${NAMESPACE} still terminating after ${WAIT_TIMEOUT} — dump finalizers and leave it for the TTL janitor"
+            kubectl get namespace "${NAMESPACE}" -o jsonpath='{.metadata.finalizers}' || true
+            echo
+            exit 0
+          fi
+          echo "::notice title=Env destroyed::${NAMESPACE} deleted"
