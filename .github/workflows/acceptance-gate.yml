@@ -240,7 +240,7 @@ jobs:
 
       - name: Wait for HelmRelease
         id: wait
-        uses: ianoflynnautomation/bjjeire-ci-templates/actions/flux-wait-helmrelease@main  # pin SHA after templates PR merges
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/flux-wait-helmrelease@77d3238a8e555c7f51b256cd0301454000b0b7bf  # v1.4.0
         with:
           namespace: ${{ inputs.env-id }}
           name: bjj-eire
@@ -250,7 +250,7 @@ jobs:
 
       - name: Collect diagnostics
         if: failure()
-        uses: ianoflynnautomation/bjjeire-ci-templates/actions/collect-k8s-diagnostics@main  # pin SHA after templates PR merges
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/collect-k8s-diagnostics@77d3238a8e555c7f51b256cd0301454000b0b7bf  # v1.4.0
         with:
           namespace: ${{ inputs.env-id }}
           helm-release: bjj-eire
@@ -300,7 +300,7 @@ jobs:
       inputs.mode == 'ephemeral' &&
       needs.env_up.result == 'success' &&
       (needs.tests.result == 'success' || inputs.keep-on-failure == false)
-    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/flux-ephemeral-teardown.yml@main  # pin SHA after templates PR merges
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/flux-ephemeral-teardown.yml@77d3238a8e555c7f51b256cd0301454000b0b7bf  # v1.4.0
     with:
       env-id: ${{ inputs.env-id }}
       cluster-resource-group: ${{ inputs.cluster-resource-group }}

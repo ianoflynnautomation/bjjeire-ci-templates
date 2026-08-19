@@ -7,10 +7,6 @@ rules:
       - playwright-tests.yml
       - playwright-report.yml
 
-  unpinned-uses:
-    ignore:
-      - acceptance-gate.yml
-
   artipacked:
     ignore:
       - release-please.yml
