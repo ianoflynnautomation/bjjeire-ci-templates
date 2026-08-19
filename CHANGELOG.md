@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.3.0...v1.4.0) (2026-08-19)
+
+
+### Features
+
+* add acceptance test workflows ([939c349](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/939c349b337764aff6bdcd621fba93f3b1fc4dce))
+
 ## [1.3.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.2.0...v1.3.0) (2026-08-16)
 
 
