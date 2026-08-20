@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.4.1...v1.4.2) (2026-08-20)
+
+
+### Bug Fixes
+
+* aks login workflows ([e5a0f95](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/e5a0f9590443cd2705b9da764d6a9c3571cc8700))
+
 ## [1.4.1](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.4.0...v1.4.1) (2026-08-20)
 
 
