@@ -34,13 +34,13 @@ inputs:
     required: false
     default: 'v0.1.4'
   kubectl-version:
-    description: 'kubectl version to install. Empty installs the latest stable release.'
+    description: 'kubectl version to install. Empty or omitted installs the latest stable release (`azure/setup-kubectl` requires a non-empty version).'
     required: false
-    default: ''
+    default: 'latest'
   helm-version:
-    description: 'helm version to install. Empty installs the latest stable release.'
+    description: 'helm version to install. Empty or omitted installs the latest stable release (`azure/setup-helm` requires a non-empty version).'
     required: false
-    default: ''
+    default: 'latest'
   summary-title:
     description: 'Heading used in the step summary. Set to an empty string to skip the summary.'
     required: false
@@ -65,13 +65,14 @@ runs:
     - name: Setup kubectl
       uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d  # v5.1.0
       with:
-        version: ${{ inputs.kubectl-version }}
+        # Passing version: '' counts as "supplied" and skips the action default.
+        version: ${{ inputs.kubectl-version != '' && inputs.kubectl-version || 'latest' }}
 
     - name: Setup helm
       if: inputs.install-helm == 'true'
       uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
       with:
-        version: ${{ inputs.helm-version }}
+        version: ${{ inputs.helm-version != '' && inputs.helm-version || 'latest' }}
 
     - name: Validate Azure login inputs
       shell: bash

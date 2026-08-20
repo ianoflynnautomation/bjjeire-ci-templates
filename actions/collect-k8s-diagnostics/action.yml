@@ -109,7 +109,7 @@ runs:
         echo "::notice title=Diagnostics collected::wrote ${dump} for namespace ${NS}"
 
     - name: Upload diagnostics artifact
-      if: inputs.upload-artifact == 'true'
+      if: inputs.upload-artifact == 'true' && steps.dump.outputs.dump-dir != ''
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
         name: ${{ inputs.artifact-name }}
