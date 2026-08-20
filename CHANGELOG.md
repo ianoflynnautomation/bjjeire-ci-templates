@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.4.0...v1.4.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* acceptance gate workflow ([0b4fdbb](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/0b4fdbb2ffbfb3393d1624bc4db178e78086aab2))
+
 ## [1.4.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.3.0...v1.4.0) (2026-08-19)
 
 
