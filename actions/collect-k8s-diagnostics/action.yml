@@ -65,8 +65,9 @@ runs:
           exit 1
         fi
         if ! command -v kubectl >/dev/null 2>&1; then
-          echo "::error title=Diagnostics::kubectl is not on PATH"
-          exit 1
+          echo "::warning title=Diagnostics::kubectl is not on PATH — skipping dump (usually because Azure login failed before tools were installed)"
+          echo "dump-dir=" >> "$GITHUB_OUTPUT"
+          exit 0
         fi
 
         dump="${RUNNER_TEMP:-/tmp}/k8s-diagnostics-${NS}"

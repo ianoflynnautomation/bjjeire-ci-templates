@@ -445,6 +445,11 @@ jobs:
     name: Report + gate
     needs: [test]
     if: always()
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      pages: write
     # Relative refs to another reusable workflow resolve against the repository
     # that defines *this* file, so this stays inside bjjeire-ci-templates even
     # when called cross-repo.

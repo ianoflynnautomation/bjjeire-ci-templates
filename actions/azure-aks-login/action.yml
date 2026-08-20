@@ -57,13 +57,6 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: Azure OIDC login
-      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5  # v2.3.0
-      with:
-        client-id: ${{ inputs.client-id }}
-        tenant-id: ${{ inputs.tenant-id }}
-        subscription-id: ${{ inputs.subscription-id }}
-
     - name: Setup kubelogin
       uses: azure/use-kubelogin@0ce7c36141aa27d4934872cf00b0120804c98a29  # v1.3
       with:
@@ -79,6 +72,30 @@ runs:
       uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
       with:
         version: ${{ inputs.helm-version }}
+
+    - name: Validate Azure login inputs
+      shell: bash
+      env:
+        CLIENT_ID: ${{ inputs.client-id }}
+        TENANT_ID: ${{ inputs.tenant-id }}
+        SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+      run: |
+        set -euo pipefail
+        missing=()
+        [ -n "${CLIENT_ID}" ] || missing+=("client-id (GitHub secret AZURE_CLIENT_ID)")
+        [ -n "${TENANT_ID}" ] || missing+=("tenant-id (GitHub secret AZURE_TENANT_ID)")
+        [ -n "${SUBSCRIPTION_ID}" ] || missing+=("subscription-id (GitHub secret AZURE_SUBSCRIPTION_ID)")
+        if [ "${#missing[@]}" -gt 0 ]; then
+          echo "::error title=Azure login inputs missing::azure/login requires non-empty ${missing[*]}. Empty secrets interpolate to empty strings and fail with 'Not all values are present'."
+          exit 1
+        fi
+
+    - name: Azure OIDC login
+      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5  # v2.3.0
+      with:
+        client-id: ${{ inputs.client-id }}
+        tenant-id: ${{ inputs.tenant-id }}
+        subscription-id: ${{ inputs.subscription-id }}
 
     - name: Get AKS credentials
       shell: bash

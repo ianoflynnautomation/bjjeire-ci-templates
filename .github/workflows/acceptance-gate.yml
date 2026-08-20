@@ -42,7 +42,12 @@ on:
         required: false
         default: ""
       cluster-domain:
-        description: "Per-cluster DNS suffix (e.g. dev.bjjeire.com). Public hosts nest under this."
+        description: "Per-cluster DNS suffix (e.g. dev.bjjeire.com). Used for CLUSTER_DOMAIN in sha-env."
+        type: string
+        required: false
+        default: ""
+      root-domain:
+        description: "Zone apex used for public preview/SHA hostnames (e.g. bjjeire.com). Cloudflare Universal SSL covers *.root-domain. Defaults to cluster-domain."
         type: string
         required: false
         default: ""
@@ -203,6 +208,7 @@ jobs:
           ENV_ID: ${{ inputs.env-id }}
           IMAGE_TAG: ${{ inputs.image-tag }}
           CLUSTER_DOMAIN: ${{ inputs.cluster-domain }}
+          ROOT_DOMAIN: ${{ inputs.root-domain != '' && inputs.root-domain || inputs.cluster-domain }}
           TTL: ${{ inputs.ttl }}
           MANIFEST: ${{ inputs.sha-env-path }}
           VALUES: ${{ inputs.values-path }}
@@ -210,7 +216,7 @@ jobs:
           GITOPS_REF: ${{ inputs.gitops-ref }}
         run: |
           set -euo pipefail
-          : "${ENV_ID:?}" "${IMAGE_TAG:?}" "${CLUSTER_DOMAIN:?}" "${TTL:?}"
+          : "${ENV_ID:?}" "${IMAGE_TAG:?}" "${CLUSTER_DOMAIN:?}" "${ROOT_DOMAIN:?}" "${TTL:?}"
           if [ ! -f "${MANIFEST}" ]; then
             echo "::error title=Missing manifest::${MANIFEST} not in ${GITOPS_REPO}@${GITOPS_REF}"
             exit 1
@@ -223,7 +229,7 @@ jobs:
             python3 -c '
           import os, pathlib, sys
           text = pathlib.Path(sys.argv[1]).read_text()
-          for key in ("ENV_ID", "IMAGE_TAG", "CLUSTER_DOMAIN", "TTL"):
+          for key in ("ENV_ID", "IMAGE_TAG", "CLUSTER_DOMAIN", "ROOT_DOMAIN", "TTL"):
               text = text.replace("$" + "{" + key + "}", os.environ[key])
           sys.stdout.write(text)
           ' "$1"
@@ -245,7 +251,7 @@ jobs:
           namespace: ${{ inputs.env-id }}
           name: bjj-eire
           timeout: 10m
-          cluster-domain: ${{ inputs.cluster-domain }}
+          cluster-domain: ${{ inputs.root-domain != '' && inputs.root-domain || inputs.cluster-domain }}
           env-id: ${{ inputs.env-id }}
 
       - name: Collect diagnostics
@@ -300,6 +306,9 @@ jobs:
       inputs.mode == 'ephemeral' &&
       needs.env_up.result == 'success' &&
       (needs.tests.result == 'success' || inputs.keep-on-failure == false)
+    permissions:
+      contents: read
+      id-token: write
     uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/flux-ephemeral-teardown.yml@77d3238a8e555c7f51b256cd0301454000b0b7bf  # v1.4.0
     with:
       env-id: ${{ inputs.env-id }}
