@@ -59,13 +59,13 @@ runs:
 
     - name: Setup Kustomize
       if: inputs.kustomize-version != ''
-      uses: fluxcd/pkg/actions/kustomize@827f6c319fb09577b6243e95b6c07dffe53bb6f3
+      uses: fluxcd/pkg/actions/kustomize@827f6c319fb09577b6243e95b6c07dffe53bb6f3  # main @ 2026-06-29 (fluxcd/pkg publishes no actions/* tags)
       with:
         version: ${{ inputs.kustomize-version }}
 
     - name: Setup kubeconform
       if: inputs.kubeconform-version != ''
-      uses: fluxcd/pkg/actions/kubeconform@827f6c319fb09577b6243e95b6c07dffe53bb6f3
+      uses: fluxcd/pkg/actions/kubeconform@827f6c319fb09577b6243e95b6c07dffe53bb6f3  # main @ 2026-06-29 (fluxcd/pkg publishes no actions/* tags)
       with:
         version: ${{ inputs.kubeconform-version }}
 

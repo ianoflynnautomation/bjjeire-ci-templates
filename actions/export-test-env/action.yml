@@ -1,0 +1,92 @@
+name: 'Export Test Environment'
+description: >-
+  Compose a test environment from newline-separated KEY=VALUE payloads, masking
+  every secret value with ::add-mask:: before it is written. Writes either to
+  $GITHUB_ENV (for tests running directly on the runner) or to a mode-600 file
+  under RUNNER_TEMP (for tests running in a container, via `docker --env-file`).
+  Supports per-project overrides so one matrix can send API shards at in-cluster
+  DNS while browser shards keep the public origin.
+
+inputs:
+  target:
+    description: >-
+      `github-env` appends to $GITHUB_ENV, exporting to every later step in the
+      job. `file` writes a mode-600 file under RUNNER_TEMP and returns its path
+      as the `path` output — use this when the values must reach a container
+      rather than the runner, so they never enter the runner's own environment.
+    required: false
+    default: 'github-env'
+  file-prefix:
+    description: >-
+      Basename prefix for the generated file when target is `file`. Characters
+      outside [A-Za-z0-9._-] are replaced with `-`. Ignored for `github-env`.
+    required: false
+    default: 'test-env'
+  base-vars:
+    description: >-
+      Newline-separated KEY=VALUE pairs written first, unmasked and without a
+      summary notice. For the fixed preamble a caller always sets — CI, APP_ENV,
+      BASE_URL, API_URL. Written first so both later payloads and the
+      per-project overrides can replace them.
+    required: false
+    default: ''
+  env-vars:
+    description: >-
+      Newline-separated KEY=VALUE pairs, written unmasked. Non-sensitive
+      configuration only — use secret-env-vars for anything that must be masked.
+    required: false
+    default: ''
+  secret-env-vars:
+    description: >-
+      Newline-separated KEY=VALUE pairs whose values are each registered with
+      ::add-mask:: before being written. Pass the secret straight through from
+      `secrets.*`; never interpolate it into a `run:` body at the call site.
+    required: false
+    default: ''
+  project-env-overrides:
+    description: >-
+      Newline-separated `<project>:KEY=VALUE` entries applied last, so they beat
+      every other payload. Only lines whose project matches project-name are
+      applied. Split on the first colon only, so values containing colons (URLs)
+      survive intact. Use an empty value to unset a variable for that project.
+    required: false
+    default: ''
+  project-name:
+    description: >-
+      Selects which project-env-overrides lines apply — typically the matrix
+      entry name. Required whenever project-env-overrides is non-empty.
+    required: false
+    default: ''
+
+outputs:
+  path:
+    description: >-
+      Absolute path of the generated env file when target is `file`; empty for
+      `github-env`, which writes to the runner's own command file rather than
+      to something a caller may hand to `docker --env-file`.
+    value: ${{ steps.export.outputs.path }}
+  plain-count:
+    description: 'Number of variables written from env-vars.'
+    value: ${{ steps.export.outputs.plain-count }}
+  masked-count:
+    description: 'Number of variables written from secret-env-vars.'
+    value: ${{ steps.export.outputs.masked-count }}
+  override-count:
+    description: 'Number of project-env-overrides entries that matched project-name.'
+    value: ${{ steps.export.outputs.override-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Export test environment
+      id: export
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        FILE_PREFIX: ${{ inputs.file-prefix }}
+        BASE_VARS: ${{ inputs.base-vars }}
+        PLAIN_ENV_VARS: ${{ inputs.env-vars }}
+        SECRET_ENV_VARS: ${{ inputs.secret-env-vars }}
+        PROJECT_OVERRIDES: ${{ inputs.project-env-overrides }}
+        PROJECT_NAME: ${{ inputs.project-name }}
+      run: bash "${GITHUB_ACTION_PATH}/scripts/write-test-env.sh"

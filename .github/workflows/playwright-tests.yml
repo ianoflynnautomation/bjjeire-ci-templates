@@ -305,7 +305,6 @@ jobs:
           repository: ${{ inputs.test-repo }}
           ref: ${{ inputs.test-repo-ref }}
           persist-credentials: false
-          # --only-changed needs history to diff against the base ref.
           fetch-depth: ${{ inputs.only-changed-ref == '' && 1 || 0 }}
 
       - name: Cache npm downloads
@@ -321,8 +320,6 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
         env:
           INSTALL_COMMAND: ${{ inputs.install-command }}
-          # The image already ships the browsers; re-downloading them per shard
-          # is the single most expensive avoidable step in this job.
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: |
           set -euo pipefail
@@ -330,68 +327,19 @@ jobs:
           bash -c "$INSTALL_COMMAND"
           echo "::endgroup::"
 
-      # Everything flows through $GITHUB_ENV, including BASE_URL/API_URL, so
-      # that project-env-overrides can genuinely override them. A job-level
-      # `env:` entry would win over $GITHUB_ENV and silently defeat the
-      # override.
       - name: Export test environment
-        shell: bash
-        env:
-          APP_ENV_INPUT: ${{ inputs.app-env }}
-          BASE_URL_INPUT: ${{ inputs.base-url }}
-          API_URL_INPUT: ${{ inputs.api-url }}
-          PLAIN_ENV_VARS: ${{ inputs.env-vars }}
-          SECRET_ENV_VARS: ${{ secrets.test-env-vars }}
-          PROJECT_OVERRIDES: ${{ inputs.project-env-overrides }}
-          PROJECT_NAME: ${{ matrix.entry.name }}
-        run: |
-          set -euo pipefail
-          {
-            echo "CI=true"
-            echo "APP_ENV=${APP_ENV_INPUT}"
-            echo "BASE_URL=${BASE_URL_INPUT}"
-            echo "API_URL=${API_URL_INPUT}"
-          } >> "$GITHUB_ENV"
-
-          write_vars() {
-            local mask="$1" payload="$2" count=0 line
-            [ -z "${payload//[[:space:]]/}" ] && return 0
-            while IFS= read -r line; do
-              [ -z "${line//[[:space:]]/}" ] && continue
-              case "$line" in
-                *=*) ;;
-                *) echo "::error title=Environment::Not a KEY=VALUE pair: ${line%%=*}"; exit 1 ;;
-              esac
-              if [ "$mask" = "true" ] && [ -n "${line#*=}" ]; then
-                echo "::add-mask::${line#*=}"
-              fi
-              printf '%s\n' "$line" >> "$GITHUB_ENV"
-              count=$((count + 1))
-            done <<< "$payload"
-            echo "::notice title=Environment::Exported ${count} $([ "$mask" = "true" ] && echo masked || echo plain) variable(s)"
-          }
-          write_vars false "$PLAIN_ENV_VARS"
-          write_vars true "$SECRET_ENV_VARS"
-
-          # Per-project overrides land last so they win. Each line is
-          # `<project>:KEY=VALUE`; split on the first colon only, so values
-          # containing colons (URLs) survive intact.
-          applied=0
-          while IFS= read -r line; do
-            [ -z "${line//[[:space:]]/}" ] && continue
-            case "$line" in
-              *:*=*) ;;
-              *) echo "::error title=Environment::Not a <project>:KEY=VALUE entry: ${line}"; exit 1 ;;
-            esac
-            entry_project="${line%%:*}"
-            assignment="${line#*:}"
-            [ "${entry_project//[[:space:]]/}" = "$PROJECT_NAME" ] || continue
-            printf '%s\n' "$assignment" >> "$GITHUB_ENV"
-            applied=$((applied + 1))
-          done <<< "$PROJECT_OVERRIDES"
-          if [ "$applied" -gt 0 ]; then
-            echo "::notice title=Environment::Applied ${applied} override(s) for project '${PROJECT_NAME}'"
-          fi
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/export-test-env@v1
+        with:
+          target: github-env
+          base-vars: |
+            CI=true
+            APP_ENV=${{ inputs.app-env }}
+            BASE_URL=${{ inputs.base-url }}
+            API_URL=${{ inputs.api-url }}
+          env-vars: ${{ inputs.env-vars }}
+          secret-env-vars: ${{ secrets.test-env-vars }}
+          project-env-overrides: ${{ inputs.project-env-overrides }}
+          project-name: ${{ matrix.entry.name }}
 
       - name: Run Playwright tests
         shell: bash
@@ -450,9 +398,6 @@ jobs:
       actions: read
       id-token: write
       pages: write
-    # Relative refs to another reusable workflow resolve against the repository
-    # that defines *this* file, so this stays inside bjjeire-ci-templates even
-    # when called cross-repo.
     uses: ./.github/workflows/playwright-report.yml
     with:
       test-result: ${{ needs.test.result }}

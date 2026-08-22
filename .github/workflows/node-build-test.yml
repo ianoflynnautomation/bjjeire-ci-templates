@@ -177,33 +177,11 @@ jobs:
           echo "::notice title=Dependencies::${INSTALL_COMMAND} complete (cache-hit=${CACHE_HIT:-false})"
 
       - name: Export environment
-        shell: bash
-        env:
-          PLAIN_ENV_VARS: ${{ inputs.env-vars }}
-          SECRET_ENV_VARS: ${{ secrets.env-vars }}
-        run: |
-          set -euo pipefail
-          write_vars() {
-            local mask="$1" payload="$2" count=0
-            if [ -z "${payload//[[:space:]]/}" ]; then
-              return 0
-            fi
-            while IFS= read -r line; do
-              if [ -z "${line//[[:space:]]/}" ]; then continue; fi
-              case "$line" in
-                *=*) ;;
-                *) echo "::error title=Environment::Not a KEY=VALUE pair: ${line%%=*}"; exit 1 ;;
-              esac
-              if [ "$mask" = "true" ]; then
-                echo "::add-mask::${line#*=}"
-              fi
-              printf '%s\n' "$line" >> "$GITHUB_ENV"
-              count=$((count + 1))
-            done <<< "$payload"
-            echo "::notice title=Environment::Exported ${count} $([ "$mask" = "true" ] && echo masked || echo plain) variable(s)"
-          }
-          write_vars false "$PLAIN_ENV_VARS"
-          write_vars true "$SECRET_ENV_VARS"
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/export-test-env@v1
+        with:
+          target: github-env
+          env-vars: ${{ inputs.env-vars }}
+          secret-env-vars: ${{ secrets.env-vars }}
 
       - name: Download input artifact
         if: inputs.download-artifact-name != ''

@@ -87,13 +87,48 @@ on:
         required: false
         type: boolean
         default: true
+      terraform-docs:
+        description: >-
+          Check that each module's README is in sync with its variables and
+          outputs, using terraform-docs in diff mode. Off by default — it fails
+          every module whose README has no <!-- BEGIN_TF_DOCS --> block yet, so
+          it should be an explicit opt-in rather than a gate that appears under
+          existing consumers.
+        required: false
+        type: boolean
+        default: false
+      terraform-docs-recursive:
+        description: >-
+          Check submodules under terraform-docs-recursive-path as well as the
+          root. Turn on for a module repo; leave off for a single root module.
+        required: false
+        type: boolean
+        default: false
+      terraform-docs-recursive-path:
+        description: "Directory searched for submodules when terraform-docs-recursive is true."
+        required: false
+        type: string
+        default: "modules"
+      terraform-docs-config:
+        description: 'Path to a .terraform-docs.yml config file. "disabled" (the default) uses the action defaults.'
+        required: false
+        type: string
+        default: "disabled"
+      terraform-docs-enforce:
+        description: "When false, out-of-date module docs are reported but do not fail the job."
+        required: false
+        type: boolean
+        default: true
       comment-on-pr:
         description: "Post a results table as a sticky PR comment, updated in place on each push. Requires pull-requests: write."
         required: false
         type: boolean
         default: true
       comment-title:
-        description: "Heading of the sticky comment. Also identifies the comment for in-place updates, so keep it stable per repo."
+        description: >-
+          Heading of the sticky comment. Purely cosmetic — the comment is
+          identified for in-place updates by a hidden marker keyed on
+          working-directory, so changing this no longer orphans the comment.
         required: false
         type: string
         default: "Terraform Quality Checks"
@@ -117,6 +152,9 @@ on:
       tflint-outcome:
         description: "Outcome of the tflint run: success | failure | skipped."
         value: ${{ jobs.quality.outputs.tflint-outcome }}
+      terraform-docs-outcome:
+        description: "Outcome of the terraform-docs check: success | failure | skipped."
+        value: ${{ jobs.quality.outputs.terraform-docs-outcome }}
 
 jobs:
   quality:
@@ -130,6 +168,7 @@ jobs:
       fmt-outcome: ${{ steps.fmt.outcome }}
       validate-outcome: ${{ steps.validate.outcome }}
       tflint-outcome: ${{ steps.tflint.outcome }}
+      terraform-docs-outcome: ${{ steps.terraform-docs.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -234,6 +273,21 @@ jobs:
 
           exit "$failed"
 
+      - name: Terraform docs check
+        id: terraform-docs
+        if: inputs.terraform-docs
+        continue-on-error: true
+        uses: terraform-docs/gh-actions@6de6da0cefcc6b4b7a5cbea4d79d97060733093c  # v1.4.1
+        with:
+          working-dir: ${{ inputs.working-directory }}
+          config-file: ${{ inputs.terraform-docs-config }}
+          recursive: ${{ inputs.terraform-docs-recursive }}
+          recursive-path: ${{ inputs.terraform-docs-recursive-path }}
+          output-file: README.md
+          output-method: inject
+          git-push: "false"
+          fail-on-diff: "true"
+
       - name: Write quality summary
         if: always()
         env:
@@ -244,6 +298,8 @@ jobs:
           FMT_ENFORCE: ${{ inputs.fmt-enforce }}
           VALIDATE_ENFORCE: ${{ inputs.validate-enforce }}
           TFLINT_ENFORCE: ${{ inputs.tflint-enforce }}
+          TFDOCS: ${{ steps.terraform-docs.outcome }}
+          TFDOCS_ENFORCE: ${{ inputs.terraform-docs-enforce }}
           WORKING_DIR: ${{ inputs.working-directory }}
         run: |
           {
@@ -256,53 +312,60 @@ jobs:
             echo "| Format | ${FMT:-skipped} | ${FMT_ENFORCE} |"
             echo "| Validate | ${VALIDATE:-skipped} | ${VALIDATE_ENFORCE} |"
             echo "| TFLint | ${TFLINT:-skipped} | ${TFLINT_ENFORCE} |"
+            echo "| Module docs | ${TFDOCS:-skipped} | ${TFDOCS_ENFORCE} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Comment results on PR
+      - name: Build PR comment
+        id: comment-body
         if: ${{ always() && inputs.comment-on-pr && github.event_name == 'pull_request' }}
-        continue-on-error: true
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        shell: bash
         env:
           TITLE: ${{ inputs.comment-title }}
           FMT: ${{ steps.fmt.outcome }}
           VALIDATE: ${{ steps.validate.outcome }}
           TFLINT: ${{ steps.tflint.outcome }}
+          TFDOCS: ${{ steps.terraform-docs.outcome }}
           WORKING_DIR: ${{ inputs.working-directory }}
+          ACTOR: ${{ github.actor }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          icon() {
+            case "$1" in
+              success) printf ':white_check_mark:' ;;
+              skipped|"") printf ':heavy_minus_sign:' ;;
+              *) printf ':x:' ;;
+            esac
+          }
+          # The backticks are literal markdown, not command substitution.
+          # shellcheck disable=SC2016
+          row() { printf '| %s | `%s` | %s |\n' "$1" "${2:-skipped}" "$(icon "${2:-}")"; }
+          {
+            echo "body<<STICKY_EOF"
+            echo "### ${TITLE}"
+            echo ""
+            echo "Directory: \`${WORKING_DIR}\`"
+            echo ""
+            echo "| Check | Result | Status |"
+            echo "| --- | --- | --- |"
+            row "Format" "${FMT:-}"
+            row "Validate" "${VALIDATE:-}"
+            row "TFLint" "${TFLINT:-}"
+            row "Module docs" "${TFDOCS:-}"
+            echo ""
+            echo "_Triggered by @${ACTOR} · \`${EVENT}\`_"
+            echo "STICKY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Comment results on PR
+        if: ${{ always() && inputs.comment-on-pr && github.event_name == 'pull_request' }}
+        continue-on-error: true
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/sticky-comment@v1
         with:
-          script: |
-            const title = process.env.TITLE;
-            const icon = (o) => o === 'success' ? '✅' : (o === 'skipped' || !o) ? '➖' : '❌';
-            const row = (label, outcome) =>
-              `| ${label} | \`${outcome || 'skipped'}\` | ${icon(outcome)} |`;
+          marker: terraform-quality:${{ inputs.working-directory }}
+          body: ${{ steps.comment-body.outputs.body }}
+          summary-title: ""
 
-            const body = [
-              `### ${title}`,
-              '',
-              `Directory: \`${process.env.WORKING_DIR}\``,
-              '',
-              '| Check | Result | Status |',
-              '| --- | --- | --- |',
-              row('Format', process.env.FMT),
-              row('Validate', process.env.VALIDATE),
-              row('TFLint', process.env.TFLINT),
-              '',
-              `*Triggered by @${context.actor} · \`${context.eventName}\` · workflow \`${process.env.GITHUB_WORKFLOW}\`*`,
-            ].join('\n');
-
-            const { owner, repo } = context.repo;
-            const issue_number = context.issue.number;
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner, repo, issue_number, per_page: 100,
-            });
-            // Identify our comment by its heading so repeated pushes edit one
-            // comment instead of spamming the thread.
-            const existing = comments.find((c) => c.user.type === 'Bot' && c.body?.includes(title));
-
-            if (existing) {
-              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number, body });
-            }
 
       - name: Gate
         if: always()
@@ -313,6 +376,8 @@ jobs:
           FMT_ENFORCE: ${{ inputs.fmt-enforce }}
           VALIDATE_ENFORCE: ${{ inputs.validate-enforce }}
           TFLINT_ENFORCE: ${{ inputs.tflint-enforce }}
+          TFDOCS: ${{ steps.terraform-docs.outcome }}
+          TFDOCS_ENFORCE: ${{ inputs.terraform-docs-enforce }}
         run: |
           set -euo pipefail
           failed=0
@@ -329,6 +394,7 @@ jobs:
           check "terraform fmt" "${FMT:-skipped}" "$FMT_ENFORCE"
           check "terraform validate" "${VALIDATE:-skipped}" "$VALIDATE_ENFORCE"
           check "tflint" "${TFLINT:-skipped}" "$TFLINT_ENFORCE"
+          check "terraform-docs" "${TFDOCS:-skipped}" "$TFDOCS_ENFORCE"
 
           if [ "$failed" -eq 0 ]; then
             echo "::notice title=Terraform quality::All enforced checks passed"

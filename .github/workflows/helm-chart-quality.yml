@@ -22,7 +22,9 @@ on:
           Newline-separated paths searched for charts to lint. Globs are
           expanded. A path that is itself a chart (contains Chart.yaml) is used
           directly; any other directory is searched recursively for charts.
-          Vendored subcharts under a "charts/" directory are never linted twice.
+          Vendored subcharts — a "charts/" directory inside a chart — are
+          never linted twice. A top-level "charts/" directory is searched
+          normally, since that is where most repos keep their charts.
         required: false
         type: string
         default: "."
@@ -236,9 +238,25 @@ jobs:
               # Not a chart itself — search it, but never descend into vendored
               # subcharts: `helm dependency build` unpacks them under charts/
               # and linting those is linting someone else's chart.
+              #
+              # The test is "a charts/ directory whose parent is itself a
+              # chart", not "any path containing charts/" — the latter also
+              # excludes the top-level charts/ directory that most Helm repos
+              # keep their charts in, silently discovering nothing.
               while IFS= read -r found; do
-                charts+="$(dirname "$found")"$'\n'
-              done < <(find "$entry" -type f -name Chart.yaml -not -path '*/charts/*' | sort)
+                found_dir="$(dirname "$found")"
+                vendored=0
+                probe="$found_dir"
+                while [ "$probe" != "." ] && [ "$probe" != "/" ]; do
+                  probe_parent="$(dirname "$probe")"
+                  if [ "$(basename "$probe")" = "charts" ] && [ -f "${probe_parent}/Chart.yaml" ]; then
+                    vendored=1
+                    break
+                  fi
+                  probe="$probe_parent"
+                done
+                [ "$vendored" -eq 1 ] || charts+="${found_dir}"$'\n'
+              done < <(find "$entry" -type f -name Chart.yaml | sort)
             done
             if [ "$matched" -eq 0 ]; then
               echo "::warning title=No match::Pattern '${pattern}' matched nothing"
@@ -289,13 +307,23 @@ jobs:
             [ -n "$chart" ] || continue
 
             # An umbrella chart cannot lint until its subcharts are present.
+            # A resolve failure is recorded like a lint failure rather than
+            # aborting under `set -e`, which would discard $rows and leave the
+            # run with no summary at all — including for the charts that passed.
             if [ "$DEPENDENCY_BUILD" = "true" ] && grep -q '^dependencies:' "${chart}/Chart.yaml"; then
               echo "::group::helm dependency (${chart})"
               if [ -f "${chart}/Chart.lock" ]; then
-                helm dependency build "$chart"
+                dep_cmd=(helm dependency build "$chart")
               else
                 echo "::notice title=No Chart.lock::${chart} has dependencies but no lock file — running 'helm dependency update'"
-                helm dependency update "$chart"
+                dep_cmd=(helm dependency update "$chart")
+              fi
+              if ! "${dep_cmd[@]}"; then
+                echo "::endgroup::"
+                echo "::error file=${chart}/Chart.yaml,title=Dependency resolve failed::${chart} could not resolve its dependencies"
+                rows+="| \`${chart}\` | :x: dependency resolve |"$'\n'
+                failed=1
+                continue
               fi
               echo "::endgroup::"
             fi
@@ -344,130 +372,30 @@ jobs:
 
       - name: Setup kubeconform
         if: inputs.validate
-        uses: fluxcd/pkg/actions/kubeconform@dfc427c54394de76e0053c2eba45699fad01c3b4
+        uses: fluxcd/pkg/actions/kubeconform@dfc427c54394de76e0053c2eba45699fad01c3b4  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
         with:
           version: ${{ inputs.kubeconform-version }}
 
-      # The render logic is inlined rather than calling actions/helm-render:
-      # a relative `uses:` inside a reusable workflow resolves against the
-      # caller repo, not this one. See CONTRIBUTING.md. Consumers that want the
-      # step on its own use
-      # ianoflynnautomation/bjjeire-ci-templates/actions/helm-render@v1.
+      # Delegates to actions/helm-render rather than repeating it: the inline
+      # copy had already drifted from the composite. Fully qualified because a
+      # relative `uses: ./actions/...` inside a reusable workflow is read from
+      # $GITHUB_WORKSPACE, which holds the caller's checkout. See CONTRIBUTING.
       - name: Render charts
         id: render
-        env:
-          CHART_PATHS: ${{ inputs.render-charts }}
-          OUTPUT_DIR: ${{ inputs.output-dir }}
-          RELEASE_NAME: ${{ inputs.release-name }}
-          NAMESPACE: ${{ inputs.namespace }}
-          VALUES_FILES: ${{ inputs.values-files }}
-          SET_VALUES: ${{ inputs.set-values }}
-          SET_STRING_VALUES: ${{ inputs.set-string-values }}
-          INCLUDE_CRDS: ${{ inputs.include-crds }}
-          DEPENDENCY_BUILD: ${{ inputs.dependency-build }}
-          EXTRA_ARGS: ${{ inputs.template-args }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$OUTPUT_DIR"
-
-          common_args=()
-          [ -n "$NAMESPACE" ] && common_args+=(--namespace "$NAMESPACE")
-          [ "$INCLUDE_CRDS" = "true" ] && common_args+=(--include-crds)
-
-          while IFS= read -r vf; do
-            vf="${vf#"${vf%%[![:space:]]*}"}"; vf="${vf%"${vf##*[![:space:]]}"}"
-            [ -n "$vf" ] || continue
-            if [ ! -f "$vf" ]; then
-              echo "::error title=Missing values file::${vf} does not exist"
-              exit 1
-            fi
-            common_args+=(--values "$vf")
-          done <<< "$VALUES_FILES"
-
-          while IFS= read -r kv; do
-            kv="${kv#"${kv%%[![:space:]]*}"}"; kv="${kv%"${kv##*[![:space:]]}"}"
-            [ -n "$kv" ] || continue
-            common_args+=(--set "$kv")
-          done <<< "$SET_VALUES"
-
-          while IFS= read -r kv; do
-            kv="${kv#"${kv%%[![:space:]]*}"}"; kv="${kv%"${kv##*[![:space:]]}"}"
-            [ -n "$kv" ] || continue
-            common_args+=(--set-string "$kv")
-          done <<< "$SET_STRING_VALUES"
-
-          read -ra extra_args <<< "$EXTRA_ARGS"
-
-          rendered=0
-          skipped=0
-          rows=""
-          shopt -s nullglob
-
-          while IFS= read -r pattern; do
-            pattern="${pattern#"${pattern%%[![:space:]]*}"}"; pattern="${pattern%"${pattern##*[![:space:]]}"}"
-            [ -n "$pattern" ] || continue
-
-            matched=0
-            # Unquoted on purpose: applies glob expansion to the caller pattern.
-            # shellcheck disable=SC2086
-            for dir in $pattern; do
-              matched=1
-              if [ ! -d "$dir" ] || [ ! -f "${dir}/Chart.yaml" ]; then
-                echo "::warning title=Not a chart::${dir} has no Chart.yaml — skipping"
-                skipped=$((skipped + 1))
-                rows+="| \`${dir}\` | — | skipped (no Chart.yaml) |"$'\n'
-                continue
-              fi
-
-              chart_name="$(awk '/^name:[[:space:]]/ {sub(/^name:[[:space:]]*/, ""); gsub(/["'"'"']/, ""); print; exit}' "${dir}/Chart.yaml")"
-              name="${RELEASE_NAME:-$chart_name}"
-              if [ -z "$name" ]; then
-                echo "::error file=${dir}/Chart.yaml,title=Unnamed chart::Chart.yaml has no top-level 'name' and no release-name was supplied"
-                exit 1
-              fi
-
-              if [ "$DEPENDENCY_BUILD" = "true" ] && grep -q '^dependencies:' "${dir}/Chart.yaml"; then
-                echo "::group::helm dependency (${dir})"
-                if [ -f "${dir}/Chart.lock" ]; then
-                  helm dependency build "$dir"
-                else
-                  helm dependency update "$dir"
-                fi
-                echo "::endgroup::"
-              fi
-
-              slug="${dir#./}"; slug="${slug%/}"; slug="${slug//\//-}"
-              out="${OUTPUT_DIR}/${slug}.yaml"
-
-              echo "::group::helm template ${name} ${dir}"
-              helm template "$name" "$dir" "${common_args[@]}" "${extra_args[@]}" > "$out"
-              echo "::endgroup::"
-
-              rendered=$((rendered + 1))
-              rows+="| \`${dir}\` | \`${chart_name}\` | \`${out}\` |"$'\n'
-            done
-
-            if [ "$matched" -eq 0 ]; then
-              echo "::warning title=No match::Pattern '${pattern}' matched nothing"
-              rows+="| \`${pattern}\` | — | no match |"$'\n'
-            fi
-          done <<< "$CHART_PATHS"
-
-          echo "rendered-count=${rendered}" >> "$GITHUB_OUTPUT"
-          {
-            echo "### Helm template"
-            echo ""
-            echo "| Chart path | Chart | Output |"
-            echo "| --- | --- | --- |"
-            printf '%s' "$rows"
-            echo ""
-            echo "Rendered **${rendered}**, skipped **${skipped}**."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          if [ "$rendered" -eq 0 ]; then
-            echo "::error title=Nothing rendered::No path in 'render-charts' produced output — check the patterns"
-            exit 1
-          fi
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/helm-render@v1
+        with:
+          chart-paths: ${{ inputs.render-charts }}
+          output-dir: ${{ inputs.output-dir }}
+          release-name: ${{ inputs.release-name }}
+          namespace: ${{ inputs.namespace }}
+          values-files: ${{ inputs.values-files }}
+          set-values: ${{ inputs.set-values }}
+          set-string-values: ${{ inputs.set-string-values }}
+          include-crds: ${{ inputs.include-crds }}
+          dependency-build: ${{ inputs.dependency-build }}
+          extra-args: ${{ inputs.template-args }}
+          fail-on-empty: true
+          summary-title: Helm template
 
       - name: Validate with kubeconform
         if: inputs.validate
@@ -490,9 +418,16 @@ jobs:
             args+=(-schema-location "$loc")
           done <<< "$SCHEMA_LOCATIONS"
 
+          shopt -s nullglob
+          manifests=("${OUTPUT_DIR}"/*.yaml)
+          if [ "${#manifests[@]}" -eq 0 ]; then
+            echo "::error title=Nothing to validate::No rendered manifests found in ${OUTPUT_DIR}"
+            exit 1
+          fi
+
           failed=0
           echo "::group::kubeconform"
-          for file in "${OUTPUT_DIR}"/*.yaml; do
+          for file in "${manifests[@]}"; do
             echo "Validating ${file}"
             if ! kubeconform "${args[@]}" "$file"; then
               echo "::error file=${file},title=Schema validation failed::${file} does not validate against Kubernetes ${KUBERNETES_VERSION}"
@@ -520,7 +455,7 @@ jobs:
         run: echo "name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Upload rendered manifests
-        if: inputs.upload-artifact
+        if: always() && inputs.upload-artifact && steps.render.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ inputs.artifact-name }}

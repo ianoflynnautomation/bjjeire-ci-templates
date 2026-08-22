@@ -326,6 +326,7 @@ jobs:
     name: Acceptance gate
     runs-on: ${{ inputs.report-runs-on }}
     timeout-minutes: 5
+    permissions: {}
     needs: [env_up, tests, env_down]
     if: always()
     steps:

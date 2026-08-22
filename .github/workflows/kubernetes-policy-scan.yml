@@ -45,10 +45,26 @@ on:
         type: boolean
         default: true
       trivy-image:
-        description: "Trivy container image. Pin by digest — a moving tag silently changes which rules run."
+        description: >-
+          Trivy container image, digest-pinned. Note this pins the *binary*
+          only: by default Trivy pulls its misconfiguration checks from
+          ghcr.io/aquasecurity/trivy-checks at scan time and refreshes them
+          every 24h, so new rules can turn a green pipeline red with no change
+          here. Set trivy-skip-check-update to pin the rules too.
         required: false
         type: string
         default: "aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e"
+      trivy-skip-check-update:
+        description: >-
+          Pass --skip-check-update so Trivy uses the checks bundle embedded in
+          the pinned image instead of downloading the latest. Makes the rule set
+          reproducible for a given trivy-image digest, at the cost of not
+          picking up new checks until you bump the image. Trivy logs a
+          "Falling back to embedded checks" ERROR line when it does this; the
+          scan is unaffected and the findings are identical.
+        required: false
+        type: boolean
+        default: false
       trivy-severity:
         description: "Comma-separated severities Trivy fails on."
         required: false
@@ -204,7 +220,11 @@ jobs:
           echo "dir=${dir}" >> "$GITHUB_OUTPUT"
           echo "::notice title=Policy scan::Scanning ${count} manifest file(s) in ${dir}"
 
+      # Scans once into a JSON report, then renders it twice with `trivy
+      # convert`. Two `trivy config` passes would re-walk every manifest and
+      # re-fetch the checks bundle just to change the output format.
       - name: Trivy misconfiguration scan
+        id: trivy
         if: inputs.trivy
         continue-on-error: ${{ !inputs.trivy-enforce }}
         env:
@@ -212,45 +232,60 @@ jobs:
           SCAN_DIR: ${{ steps.target.outputs.dir }}
           SEVERITY: ${{ inputs.trivy-severity }}
           EXTRA_ARGS: ${{ inputs.trivy-args }}
+          SKIP_CHECK_UPDATE: ${{ inputs.trivy-skip-check-update }}
         run: |
           set -euo pipefail
           read -ra extra <<< "$EXTRA_ARGS"
+
+          # The scan captures every severity; the gate below filters. That way
+          # the SARIF report and the table come from one walk of the tree.
+          scan_args=(config --skip-version-check --exit-code 0
+                     --format json --output trivy-report.json)
+          if [ "$SKIP_CHECK_UPDATE" = "true" ]; then
+            scan_args+=(--skip-check-update)
+          fi
+
           echo "::group::trivy config"
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/github/workspace" \
             -w /github/workspace \
-            "$IMAGE" config \
-              --skip-version-check \
-              --exit-code 1 \
-              --severity "$SEVERITY" \
-              --format table \
-              "${extra[@]}" \
-              "$SCAN_DIR"
+            "$IMAGE" "${scan_args[@]}" "${extra[@]}" "$SCAN_DIR"
           echo "::endgroup::"
+
+          echo "::group::trivy findings (${SEVERITY})"
+          gate=0
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/github/workspace" \
+            -w /github/workspace \
+            "$IMAGE" convert \
+              --severity "$SEVERITY" \
+              --exit-code 1 \
+              --format table \
+              trivy-report.json || gate=$?
+          echo "::endgroup::"
+          exit "$gate"
 
       - name: Trivy SARIF report
         # always(), not success(): findings that fail the gate above are exactly
-        # the ones worth having in code scanning. Guarded on the resolved
-        # directory so it is skipped when there was nothing to scan.
-        if: ${{ always() && inputs.trivy && inputs.upload-sarif && steps.target.outputs.dir != '' }}
+        # the ones worth having in code scanning. Guarded on the report itself,
+        # so it is skipped when the scan never produced one.
+        if: ${{ always() && inputs.trivy && inputs.upload-sarif && hashFiles('trivy-report.json') != '' }}
         env:
           IMAGE: ${{ inputs.trivy-image }}
-          SCAN_DIR: ${{ steps.target.outputs.dir }}
           SEVERITY: ${{ inputs.trivy-severity }}
         run: |
           set -euo pipefail
-          # --exit-code 0: this pass only produces the report; the gating
+          # --exit-code 0: this pass only renders the report; the gating
           # decision was already made by the step above.
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/github/workspace" \
             -w /github/workspace \
-            "$IMAGE" config \
-              --skip-version-check \
-              --exit-code 0 \
+            "$IMAGE" convert \
               --severity "$SEVERITY" \
+              --exit-code 0 \
               --format sarif \
               --output trivy-results.sarif \
-              "$SCAN_DIR"
+              trivy-report.json
 
       - name: Upload Trivy SARIF
         # Forked-PR runs get a read-only token and cannot write code scanning
@@ -266,6 +301,7 @@ jobs:
           sarif_file: trivy-results.sarif
 
       - name: Polaris policy audit
+        id: polaris
         if: inputs.polaris
         continue-on-error: ${{ !inputs.polaris-enforce }}
         env:
@@ -289,6 +325,7 @@ jobs:
           echo "::endgroup::"
 
       - name: kube-score workload review
+        id: kubescore
         if: inputs.kube-score
         continue-on-error: ${{ !inputs.kube-score-enforce }}
         env:
@@ -333,13 +370,20 @@ jobs:
           SEARCH_PATH: ${{ inputs.hadolint-path }}
         run: |
           set -euo pipefail
-          files="$(find "$SEARCH_PATH" -type f \( -iname Dockerfile -o -iname '*.Dockerfile' \) -print | sort | tr '\n' ' ')"
+          # Three conventions in the wild: Dockerfile, api.Dockerfile, and
+          # Dockerfile.prod. Matching only the first two meant a repo using
+          # Dockerfile.<variant> got a green "no Dockerfiles found" skip.
+          files="$(find "$SEARCH_PATH" -type f \( \
+            -iname Dockerfile -o \
+            -iname '*.Dockerfile' -o \
+            -iname 'Dockerfile.*' \) -print | sort | tr '\n' ' ')"
           echo "files=${files}" >> "$GITHUB_OUTPUT"
           if [ -z "$files" ]; then
             echo "::notice title=hadolint::No Dockerfiles found under ${SEARCH_PATH}"
           fi
 
       - name: Hadolint Dockerfiles
+        id: hadolint
         if: ${{ inputs.hadolint && steps.dockerfiles.outputs.files != '' }}
         continue-on-error: ${{ !inputs.hadolint-enforce }}
         env:
@@ -368,17 +412,48 @@ jobs:
           KUBE_SCORE: ${{ inputs.kube-score }}
           KUBE_SCORE_ENFORCE: ${{ inputs.kube-score-enforce }}
           HADOLINT: ${{ inputs.hadolint }}
+          HADOLINT_ENFORCE: ${{ inputs.hadolint-enforce }}
           HADOLINT_FILES: ${{ steps.dockerfiles.outputs.files }}
+          TRIVY_OUTCOME: ${{ steps.trivy.outcome }}
+          POLARIS_OUTCOME: ${{ steps.polaris.outcome }}
+          KUBE_SCORE_OUTCOME: ${{ steps.kubescore.outcome }}
+          HADOLINT_OUTCOME: ${{ steps.hadolint.outcome }}
         run: |
+          set -euo pipefail
+
+          # A non-enforcing scanner fails its step but lets the job pass. Without
+          # its outcome here the run is indistinguishable from a clean one, which
+          # defeats the point of report-without-blocking: the findings existed,
+          # nothing said so outside the raw log.
+          rows=""
+          add_row() {
+            local name="$1" enabled="$2" gate="$3" outcome="$4" enforce="$5" result
+            case "$outcome" in
+              success) result=":white_check_mark: pass" ;;
+              failure)
+                if [ "$enforce" = "true" ]; then
+                  result=":x: findings — failed the job"
+                else
+                  result=":warning: findings — reported only"
+                  echo "::warning title=${name}::${name} reported findings; the gate is disabled (enforce=false)"
+                fi
+                ;;
+              *) result="— not run" ;;
+            esac
+            rows+="| ${name} | ${enabled} | ${gate} | ${result} |"$'\n'
+          }
+
+          add_row "Trivy (config)" "$TRIVY" "severity ${TRIVY_SEVERITY}" "$TRIVY_OUTCOME" "$TRIVY_ENFORCE"
+          add_row "Polaris" "$POLARIS" "min score ${POLARIS_MIN_SCORE}" "$POLARIS_OUTCOME" "$POLARIS_ENFORCE"
+          add_row "kube-score" "$KUBE_SCORE" "workload checks" "$KUBE_SCORE_OUTCOME" "$KUBE_SCORE_ENFORCE"
+          add_row "hadolint" "$HADOLINT" "${HADOLINT_FILES:-no Dockerfiles}" "$HADOLINT_OUTCOME" "$HADOLINT_ENFORCE"
+
           {
             echo "### Kubernetes policy scan"
             echo ""
             echo "Scanned \`${SCAN_DIR}\`"
             echo ""
-            echo "| Scanner | Enabled | Gate |"
-            echo "| --- | --- | --- |"
-            echo "| Trivy (config) | ${TRIVY} | severity ${TRIVY_SEVERITY}, enforce=${TRIVY_ENFORCE} |"
-            echo "| Polaris | ${POLARIS} | min score ${POLARIS_MIN_SCORE}, enforce=${POLARIS_ENFORCE} |"
-            echo "| kube-score | ${KUBE_SCORE} | enforce=${KUBE_SCORE_ENFORCE} |"
-            echo "| hadolint | ${HADOLINT} | ${HADOLINT_FILES:-no Dockerfiles} |"
+            echo "| Scanner | Enabled | Gate | Result |"
+            echo "| --- | --- | --- | --- |"
+            printf '%s' "$rows"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -1,11 +1,6 @@
 
 name: Release
 
-# Thin caller over the shared release-please workflow — this repo dogfoods its
-# own template. release-please cuts SemVer tags (vX.Y.Z) from conventional
-# commits; on each release the floating major tag (vX) is force-moved so
-# consumers pinned to @v1 pick up non-breaking updates automatically.
-
 on:
   push:
     branches: [main]

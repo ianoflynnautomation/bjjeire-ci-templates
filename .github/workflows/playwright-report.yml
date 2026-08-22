@@ -326,8 +326,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     env:
-      # Unique per attempt so a re-run does not collide with the artifact the
-      # previous attempt uploaded.
       PAGES_ARTIFACT_NAME: ${{ inputs.artifact-prefix }}-pages-${{ github.run_id }}-${{ github.run_attempt }}
     outputs:
       report_url: ${{ steps.report-url.outputs.report_url }}

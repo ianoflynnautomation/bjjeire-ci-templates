@@ -1,8 +1,5 @@
 name: CI
 
-# Lints the templates themselves. Reusable workflows and composite actions
-# have no runtime of their own, so static analysis is the whole test suite.
-
 on:
   pull_request:
     branches: [main]
@@ -25,3 +22,29 @@ jobs:
     uses: ./.github/workflows/lint-workflows.yml
     with:
       zizmor-paths: ".github/workflows/ actions/ examples/"
+
+  shellcheck:
+    name: Shellcheck Action Scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Shellcheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t scripts < <(find actions -type f -name '*.sh' | sort)
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "::notice title=Shellcheck::No action scripts found"
+            exit 0
+          fi
+          echo "::group::Scripts checked"
+          printf '  %s\n' "${scripts[@]}"
+          echo "::endgroup::"
+          shellcheck --severity=style --format=gcc "${scripts[@]}"
+          echo "::notice title=Shellcheck::${#scripts[@]} script(s) clean"

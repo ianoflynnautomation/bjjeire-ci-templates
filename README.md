@@ -18,10 +18,12 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`flux-ephemeral-teardown.yml`](.github/workflows/flux-ephemeral-teardown.yml) | Label-guarded destroy of an ephemeral namespace (Helm uninstall + optional Flux HelmRelease delete + namespace delete) |
 | [`docker-build-push.yml`](.github/workflows/docker-build-push.yml) | Multi-arch buildx build with GHA cache, SBOM + provenance attestation, cosign keyless signing, Trivy scan → code scanning |
 | [`security-scan.yml`](.github/workflows/security-scan.yml) | Dependency review + gitleaks secret scan + Semgrep SAST, each independently toggleable |
-| [`terraform-quality.yml`](.github/workflows/terraform-quality.yml) | Credential-free tier: fmt + backend-less validate + tflint (root and per-module), sticky PR comment, per-check gate. Runs on fork PRs |
+| [`terraform-quality.yml`](.github/workflows/terraform-quality.yml) | Credential-free tier: fmt + backend-less validate + tflint (root and per-module) + opt-in terraform-docs drift check, sticky PR comment, per-check gate. Runs on fork PRs |
 | [`iac-scan.yml`](.github/workflows/iac-scan.yml) | Trivy misconfiguration scan over IaC source (Terraform, CFN, Helm, Dockerfile) → SARIF to code scanning |
 | [`terraform-plan.yml`](.github/workflows/terraform-plan.yml) | fmt + validate + plan (Azure OIDC), plan artifact + step summary, `has-changes` output |
 | [`terraform-apply.yml`](.github/workflows/terraform-apply.yml) | Applies the exact plan artifact, gated by a GitHub environment (required reviewers) |
+| [`terraform-drift-detection.yml`](.github/workflows/terraform-drift-detection.yml) | Scheduled plan against live state; opens one label-tracked issue on drift and closes it when clean |
+| [`terraform-destroy.yml`](.github/workflows/terraform-destroy.yml) | Guarded teardown: deny-list, typed confirmation, environment gate, dry-run; applies a saved destroy plan |
 | [`kubernetes-manifest-validation.yml`](.github/workflows/kubernetes-manifest-validation.yml) | Render Kustomize overlays (globs, no cluster list), helm lint, kubeconform schema gate, content deny-pattern, rendered-manifests artifact |
 | [`kubernetes-policy-scan.yml`](.github/workflows/kubernetes-policy-scan.yml) | Trivy misconfig (+ SARIF to code scanning), Polaris audit, opt-in kube-score and hadolint over already-rendered manifests |
 | [`helm-chart-quality.yml`](.github/workflows/helm-chart-quality.yml) | Helm sibling of the Kustomize workflow: discover charts by glob, lint, `helm template` the release charts, kubeconform gate, rendered-manifests artifact |
@@ -44,6 +46,7 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`actions/flux-wait-helmrelease`](actions/flux-wait-helmrelease/action.yml) | Wait until a Flux HelmRelease is Ready, then emit public and in-cluster URLs |
 | [`actions/collect-k8s-diagnostics`](actions/collect-k8s-diagnostics/action.yml) | Dump events, pod status, logs, and optional helm/flux status; intended for `if: failure()` |
 | [`actions/playwright-plan-matrix`](actions/playwright-plan-matrix/action.yml) | Expand Playwright projects × shards into a flat matrix, with per-project shard and config overrides |
+| [`actions/export-test-env`](actions/export-test-env/action.yml) | Compose a test environment from KEY=VALUE payloads with `::add-mask::` on every secret; writes to `$GITHUB_ENV` or a mode-600 file for `docker --env-file`, plus per-project overrides |
 | [`actions/dotnet-run-tests`](actions/dotnet-run-tests/action.yml) | Single test project with TRX output + artifact upload |
 | [`actions/detect-changes`](actions/detect-changes/action.yml) | Evaluate caller-supplied path filters; emits a `changes` JSON array + summary. Filters stay in the caller |
 | [`actions/check-required-jobs`](actions/check-required-jobs/action.yml) | Aggregate branch-protection gate over `toJson(needs)` — fails on failure/cancelled, passes on path-filter skips |
@@ -97,7 +100,7 @@ steps:
 - **Pin `@v1` (or `@vX.Y.Z`), never `@main`** — floating major tags move on release; `@main` is an unstable moving target and breaks the SemVer contract.
 - **Permissions superset** — the caller job must grant every permission any job inside the reusable workflow uses, or GitHub rejects the run at parse time. Each workflow's header comment lists exactly what to grant. Conditional jobs still need the superset at the caller.
 - **Concurrency on the caller only** — reusable workflows inherit `github.workflow` from the caller. If both declare the same concurrency group, the run deadlocks against itself. None of the workflows here declare `concurrency`; put it on your caller.
-- **Plan → apply in one run** — `terraform-apply.yml` consumes the artifact uploaded by `terraform-plan.yml`; artifacts don't cross workflow runs, so chain them with `needs:` in the same caller and gate apply with an environment.
+- **Plan → apply in one run** — `terraform-apply.yml` consumes the artifact uploaded by `terraform-plan.yml`; artifacts don't cross workflow runs, so chain them with `needs:` in the same caller and gate apply with an environment. The plan artifact is a binary plan file and Terraform stores values in it in cleartext, including `sensitive` ones — it is kept at `retention-days: 1` for that reason. `terraform-drift-detection.yml` deliberately uploads nothing, since nothing consumes its plan.
 - **Secrets** — pass explicitly (shown in examples) or use `secrets: inherit`. Explicit is preferred: it documents the contract.
 - **Relative composite paths don't work cross-repo** — `uses: ./actions/...` inside a reusable workflow resolves against the *caller*. Composites are consumed via `owner/repo/actions/name@v1`; language cache steps inside reusable workflows are inlined for that reason.
 
