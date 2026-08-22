@@ -194,7 +194,7 @@ jobs:
           persist-credentials: false
 
       - name: Log in to AKS
-        uses: ianoflynnautomation/bjjeire-ci-templates/actions/azure-aks-login@9f7cdb6063f07b29a86e4bfd759b0b7d3c4377b5  # v1.4.1
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/azure-aks-login@f51b5ef3b6c34b56452d6bec29337e9d4240b078  # v1.3.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
