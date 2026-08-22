@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.3](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.4.2...v1.4.3) (2026-08-22)
+
+
+### Bug Fixes
+
+* zizmor failing ci ([4049a93](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/4049a933b7b0eee5a72850f4ff5d8559f9b51a63))
+
 ## [1.4.2](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.4.1...v1.4.2) (2026-08-20)
 
 
