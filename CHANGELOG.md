@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.4](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.4.3...v1.4.4) (2026-08-23)
+
+
+### Bug Fixes
+
+* pin public preview hosts to in-cluster Istio for Playwright ([b64e5a4](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/b64e5a4eb35bfdf6025dbf8088a0dd8e7a085311))
+
 ## [1.4.3](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.4.2...v1.4.3) (2026-08-22)
 
 
