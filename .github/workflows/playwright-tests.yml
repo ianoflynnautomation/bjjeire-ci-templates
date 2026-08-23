@@ -183,6 +183,14 @@ on:
         required: false
         type: boolean
         default: false
+      fail-fast:
+        description: >-
+          Cancel remaining Playwright shards when one fails. Keep false so a
+          misconfigured env or infra blip on one shard still yields reports
+          from the others.
+        required: false
+        type: boolean
+        default: false
       publish-report:
         description: "Publish the merged HTML report to GitHub Pages. Requires pages: write + id-token: write at the caller."
         required: false
@@ -295,7 +303,7 @@ jobs:
       # host IPC namespace avoids renderer crashes under parallelism.
       options: --ipc=host
     strategy:
-      fail-fast: false
+      fail-fast: ${{ inputs.fail-fast }}
       matrix:
         entry: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:

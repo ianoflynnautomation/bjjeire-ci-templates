@@ -136,6 +136,14 @@ on:
         type: boolean
         required: false
         default: true
+      fail-fast:
+        description: >-
+          Cancel remaining Playwright shards when one fails. Keep false so a
+          misconfigured env or infra blip on one shard still yields reports
+          from the others.
+        type: boolean
+        required: false
+        default: false
       publish-report:
         description: "Publish the merged HTML report to GitHub Pages."
         type: boolean
@@ -294,6 +302,7 @@ jobs:
       runs-on: ${{ inputs.runs-on }}
       report-runs-on: ${{ inputs.report-runs-on }}
       fail-on-flaky: ${{ inputs.fail-on-flaky }}
+      fail-fast: ${{ inputs.fail-fast }}
       publish-report: ${{ inputs.publish-report }}
     secrets:
       test-env-vars: ${{ secrets.test-env-vars }}
