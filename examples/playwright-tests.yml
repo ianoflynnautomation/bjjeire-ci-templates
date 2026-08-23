@@ -43,8 +43,10 @@ jobs:
       test-repo-ref: main
 
       app-env: staging
-      base-url: http://my-frontend.my-namespace.svc.cluster.local
+      base-url: ${{ inputs.base_url }}
       api-url: ${{ inputs.api_url }}
+      env-vars: |
+        PIN_CLUSTER_GATEWAY=true
       test-tags: "@smoke|@acceptance"
 
       playwright-projects: |

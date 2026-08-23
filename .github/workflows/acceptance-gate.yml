@@ -289,11 +289,12 @@ jobs:
     uses: ./.github/workflows/playwright-tests.yml
     with:
       app-env: staging
-      # Ephemeral ARC jobs talk to in-cluster Service DNS so Playwright
-      # never crosses Cloudflare Bot Fight. Public URLs stay on env_up
-      # outputs for humans; mode=existing keeps the caller-supplied origin.
-      base-url: ${{ inputs.mode == 'existing' && inputs.base-url || needs.env_up.outputs.internal_base_url }}
+      # Ephemeral: keep public HTTPS origins so the SPA/MSAL boot, but pin
+      # those hostnames to the in-cluster Istio gateway (PIN_CLUSTER_GATEWAY)
+      # so Playwright never crosses Cloudflare Bot Fight.
+      base-url: ${{ inputs.mode == 'existing' && inputs.base-url || needs.env_up.outputs.base_url }}
       api-url: ${{ inputs.mode == 'existing' && inputs.api-url || needs.env_up.outputs.api_base_url }}
+      env-vars: ${{ inputs.mode == 'ephemeral' && 'PIN_CLUSTER_GATEWAY=true' || '' }}
       test-repo: ${{ inputs.test-repo }}
       test-repo-ref: ${{ inputs.test-repo-ref }}
       test-tags: ${{ inputs.test-tags }}

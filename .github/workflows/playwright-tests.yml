@@ -95,7 +95,9 @@ on:
         description: >-
           Newline-separated KEY=VALUE pairs exported to every shard. For
           non-sensitive configuration only — use the test-env-vars secret for
-          anything that must be masked.
+          anything that must be masked. Set PIN_CLUSTER_GATEWAY=true on ARC
+          jobs so public BASE_URL/API_URL hostnames resolve to the in-cluster
+          Istio gateway (skips Cloudflare Bot Fight, keeps HTTPS origin).
         required: false
         type: string
         default: ""
@@ -366,6 +368,31 @@ jobs:
           ONLY_CHANGED_REF: ${{ inputs.only-changed-ref }}
         run: |
           set -o pipefail
+          if [ "${PIN_CLUSTER_GATEWAY:-}" = "true" ]; then
+            svc="${PIN_HOSTS_SERVICE:-istio-ingressgateway-istio.istio-ingress.svc.cluster.local}"
+            ip=$(getent ahostsv4 "$svc" 2>/dev/null | awk '{print $1; exit}')
+            if [ -z "$ip" ]; then
+              ip=$(getent hosts "$svc" 2>/dev/null | awk '{print $1; exit}')
+            fi
+            if [ -z "$ip" ]; then
+              echo "::error title=Pin gateway::cannot resolve ${svc}"
+              exit 1
+            fi
+            pinned=""
+            for url in "${BASE_URL:-}" "${API_URL:-}"; do
+              [ -z "$url" ] && continue
+              host=$(printf '%s' "$url" | sed -E 's#^https?://##; s#[/?].*##; s#:.*##')
+              [ -z "$host" ] && continue
+              case "$host" in
+                *.svc.cluster.local|*.cluster.local|localhost|127.*) continue ;;
+              esac
+              if ! grep -qE "[[:space:]]${host}$" /etc/hosts 2>/dev/null; then
+                echo "$ip $host" >> /etc/hosts
+              fi
+              pinned="${pinned} ${host}"
+            done
+            echo "::notice title=Pin gateway::${pinned} -> ${ip} (${svc})"
+          fi
           echo "::notice title=Shard::${PROJECT_NAME} ${SHARD}/${SHARD_TOTAL} (${PROJECT_CONFIG})"
           args=(
             -c "${PROJECT_CONFIG}"
