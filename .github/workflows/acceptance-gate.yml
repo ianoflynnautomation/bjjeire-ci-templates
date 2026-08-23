@@ -194,7 +194,7 @@ jobs:
           persist-credentials: false
 
       - name: Log in to AKS
-        uses: ianoflynnautomation/bjjeire-ci-templates/actions/azure-aks-login@f51b5ef3b6c34b56452d6bec29337e9d4240b078  # v1.3.0
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/azure-aks-login@f64093d7f7ecd32c858cfebec38309e0e90051a1  # v1.4.2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -246,7 +246,7 @@ jobs:
 
       - name: Wait for HelmRelease
         id: wait
-        uses: ianoflynnautomation/bjjeire-ci-templates/actions/flux-wait-helmrelease@9f7cdb6063f07b29a86e4bfd759b0b7d3c4377b5  # v1.4.1
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/flux-wait-helmrelease@f64093d7f7ecd32c858cfebec38309e0e90051a1  # v1.4.2
         with:
           namespace: ${{ inputs.env-id }}
           name: bjj-eire
@@ -256,7 +256,7 @@ jobs:
 
       - name: Collect diagnostics
         if: failure()
-        uses: ianoflynnautomation/bjjeire-ci-templates/actions/collect-k8s-diagnostics@9f7cdb6063f07b29a86e4bfd759b0b7d3c4377b5  # v1.4.1
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/collect-k8s-diagnostics@f64093d7f7ecd32c858cfebec38309e0e90051a1  # v1.4.2
         with:
           namespace: ${{ inputs.env-id }}
           helm-release: bjj-eire
@@ -309,7 +309,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/flux-ephemeral-teardown.yml@9f7cdb6063f07b29a86e4bfd759b0b7d3c4377b5  # v1.4.1
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/flux-ephemeral-teardown.yml@f64093d7f7ecd32c858cfebec38309e0e90051a1  # v1.4.2
     with:
       env-id: ${{ inputs.env-id }}
       cluster-resource-group: ${{ inputs.cluster-resource-group }}
