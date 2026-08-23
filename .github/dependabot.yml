@@ -8,89 +8,13 @@ updates:
       actions:
         patterns:
           - "*"
-  # Composite actions are not under .github/workflows — register each directory
-  - package-ecosystem: github-actions
-    directory: "/actions/setup-dotnet-cached"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/setup-node-cached"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/dotnet-run-tests"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/openapi-breaking-gate"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/check-required-jobs"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/detect-changes"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/sticky-comment"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/oci-push-artifact"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/maven-openapi-export"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/setup-java-cached"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/azure-aks-login"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/wait-for-http"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/flux-wait-helmrelease"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/collect-k8s-diagnostics"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/playwright-plan-matrix"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/setup-kubernetes-tools"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/kustomize-render"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/oci-tag-audit"
-    schedule:
-      interval: weekly
 
   - package-ecosystem: github-actions
-    directory: "/actions/helm-render"
+    directories:
+      - "/actions/*"
     schedule:
       interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/helm-push-oci"
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: "/actions/parse-release-tag"
-    schedule:
-      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
