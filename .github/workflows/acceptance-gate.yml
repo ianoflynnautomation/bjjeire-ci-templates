@@ -285,7 +285,7 @@ jobs:
       packages: read
       id-token: write
       pages: write
-    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/playwright-tests.yml@cf8cd586a13d524028cdf41c72c2f502ac246722  # v1.2.0
+    uses: ./.github/workflows/playwright-tests.yml
     with:
       app-env: staging
       base-url: ${{ inputs.mode == 'existing' && inputs.base-url || needs.env_up.outputs.base_url }}
