@@ -5,7 +5,8 @@ description: >-
   $GITHUB_ENV (for tests running directly on the runner) or to a mode-600 file
   under RUNNER_TEMP (for tests running in a container, via `docker --env-file`).
   Supports per-project overrides so one matrix can send API shards at in-cluster
-  DNS while browser shards keep the public origin.
+  DNS while browser shards use a different origin (in-cluster frontend, or a
+  public URL when tests must exercise the edge).
 
 inputs:
   target:

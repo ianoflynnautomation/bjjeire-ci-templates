@@ -42,7 +42,12 @@ on:
         required: true
         type: string
       base-url:
-        description: "Exported as BASE_URL. Browser shards need a publicly resolvable origin when the app uses a redirect-based OAuth flow."
+        description: >-
+          Exported as BASE_URL. For in-cluster ARC jobs behind Cloudflare Bot
+          Fight, pass the frontend Service DNS
+          (http://bjj-frontend.<ns>.svc.cluster.local). A public https:// origin
+          is only required when tests exercise a redirect-based OAuth flow
+          against the edge.
         required: false
         type: string
         default: ""

@@ -33,6 +33,14 @@ inputs:
     description: 'In-cluster API Service port.'
     required: false
     default: '8080'
+  frontend-service:
+    description: 'In-cluster frontend Service name used for internal-base-url.'
+    required: false
+    default: 'bjj-frontend'
+  frontend-port:
+    description: 'In-cluster frontend Service port.'
+    required: false
+    default: '80'
   summary-title:
     description: 'Heading used in the step summary. Empty skips the summary.'
     required: false
@@ -54,6 +62,9 @@ outputs:
   internal-api-url:
     description: 'http://<api-service>.<namespace>.svc.cluster.local:<api-port>'
     value: ${{ steps.wait.outputs.internal-api-url }}
+  internal-base-url:
+    description: 'http://<frontend-service>.<namespace>.svc.cluster.local:<frontend-port>'
+    value: ${{ steps.wait.outputs.internal-base-url }}
 
 runs:
   using: 'composite'
@@ -69,6 +80,8 @@ runs:
         ENV_ID: ${{ inputs.env-id }}
         API_SERVICE: ${{ inputs.api-service }}
         API_PORT: ${{ inputs.api-port }}
+        FRONTEND_SERVICE: ${{ inputs.frontend-service }}
+        FRONTEND_PORT: ${{ inputs.frontend-port }}
       run: |
         set -euo pipefail
         if [ -z "${NS}" ]; then
@@ -104,14 +117,16 @@ runs:
           api_url="https://api-${env_id}.${CLUSTER_DOMAIN}"
         fi
         internal="http://${API_SERVICE}.${NS}.svc.cluster.local:${API_PORT}"
+        internal_base="http://${FRONTEND_SERVICE}.${NS}.svc.cluster.local:${FRONTEND_PORT}"
         {
           echo "ready=true"
           echo "namespace=${NS}"
           echo "base-url=${base_url}"
           echo "api-url=${api_url}"
           echo "internal-api-url=${internal}"
+          echo "internal-base-url=${internal_base}"
         } >> "$GITHUB_OUTPUT"
-        echo "::notice title=HelmRelease ready::${NS}/${NAME} Ready (frontend=${base_url:-n/a}, api=${api_url:-n/a}, internal=${internal})"
+        echo "::notice title=HelmRelease ready::${NS}/${NAME} Ready (frontend=${base_url:-n/a}, api=${api_url:-n/a}, internal-frontend=${internal_base}, internal-api=${internal})"
 
     - name: Write summary
       if: always() && inputs.summary-title != ''
@@ -124,6 +139,7 @@ runs:
         BASE: ${{ steps.wait.outputs.base-url }}
         API: ${{ steps.wait.outputs.api-url }}
         INTERNAL: ${{ steps.wait.outputs.internal-api-url }}
+        INTERNAL_BASE: ${{ steps.wait.outputs.internal-base-url }}
       run: |
         {
           echo "### ${TITLE}"
@@ -134,5 +150,6 @@ runs:
           echo "| Ready | ${READY:-false} |"
           echo "| Frontend | ${BASE:-n/a} |"
           echo "| API | ${API:-n/a} |"
+          echo "| Internal frontend | \`${INTERNAL_BASE:-n/a}\` |"
           echo "| Internal API | \`${INTERNAL:-n/a}\` |"
         } >> "$GITHUB_STEP_SUMMARY"

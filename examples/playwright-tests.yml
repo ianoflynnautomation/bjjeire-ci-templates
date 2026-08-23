@@ -43,7 +43,7 @@ jobs:
       test-repo-ref: main
 
       app-env: staging
-      base-url: ${{ inputs.base_url }}
+      base-url: http://my-frontend.my-namespace.svc.cluster.local
       api-url: ${{ inputs.api_url }}
       test-tags: "@smoke|@acceptance"
 
@@ -67,9 +67,10 @@ jobs:
       env-vars: |
         ACCEPT_INVALID_CERTS=false
 
-      # Per-project overrides land last and win. Here the API shards talk
-      # straight to the in-cluster Service DNS, which skips the edge proxy, so
-      # the edge service-token headers must be cleared for those shards only.
+      # Per-project overrides land last and win. API shards talk straight to
+      # the in-cluster Service DNS (skips Cloudflare). Browser shards should
+      # do the same via base-url (Caddy proxies /api) — Bot Fight cannot be
+      # skipped with WAF rules or CF-Access headers.
       project-env-overrides: |
         api:API_URL=http://my-api.my-namespace.svc.cluster.local
         api:CF_ACCESS_CLIENT_ID=

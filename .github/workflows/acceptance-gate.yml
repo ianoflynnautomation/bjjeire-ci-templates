@@ -192,6 +192,7 @@ jobs:
       base_url: ${{ steps.wait.outputs.base-url }}
       api_base_url: ${{ steps.wait.outputs.api-url }}
       internal_api_url: ${{ steps.wait.outputs.internal-api-url }}
+      internal_base_url: ${{ steps.wait.outputs.internal-base-url }}
       namespace: ${{ steps.wait.outputs.namespace }}
     steps:
       - name: Checkout gitops
@@ -288,7 +289,10 @@ jobs:
     uses: ./.github/workflows/playwright-tests.yml
     with:
       app-env: staging
-      base-url: ${{ inputs.mode == 'existing' && inputs.base-url || needs.env_up.outputs.base_url }}
+      # Ephemeral ARC jobs talk to in-cluster Service DNS so Playwright
+      # never crosses Cloudflare Bot Fight. Public URLs stay on env_up
+      # outputs for humans; mode=existing keeps the caller-supplied origin.
+      base-url: ${{ inputs.mode == 'existing' && inputs.base-url || needs.env_up.outputs.internal_base_url }}
       api-url: ${{ inputs.mode == 'existing' && inputs.api-url || needs.env_up.outputs.api_base_url }}
       test-repo: ${{ inputs.test-repo }}
       test-repo-ref: ${{ inputs.test-repo-ref }}
