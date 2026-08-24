@@ -90,7 +90,14 @@ on:
         description: "Default number of parallel shards per Playwright project."
         type: number
         required: false
-        default: 8
+        default: 4
+      project-shard-overrides:
+        description: >-
+          Newline-separated `project=count` overrides. Projects not listed use
+          shard-total. Empty leaves every project at shard-total.
+        type: string
+        required: false
+        default: ""
       playwright-projects:
         description: "Newline-separated Playwright project names."
         type: string
@@ -100,7 +107,9 @@ on:
           chromium-desktop
           firefox-desktop
           webkit-desktop
-          chromium-wide
+          snapshots
+          a11y
+          mobile-iphone
       keep-on-failure:
         description: "When true (default), a failed suite leaves the ephemeral namespace for debugging (TTL janitor is the backstop)."
         type: boolean
@@ -299,6 +308,7 @@ jobs:
       test-repo-ref: ${{ inputs.test-repo-ref }}
       test-tags: ${{ inputs.test-tags }}
       shard-total: ${{ inputs.shard-total }}
+      project-shard-overrides: ${{ inputs.project-shard-overrides }}
       playwright-projects: ${{ inputs.playwright-projects }}
       config-map: |
         api=playwright.api.config.ts
