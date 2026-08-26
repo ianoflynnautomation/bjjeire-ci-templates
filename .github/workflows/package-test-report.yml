@@ -1,0 +1,112 @@
+name: Package Test Report (Reusable)
+
+# Generic collect step for the audit PDF. Any team's test job can upload raw
+# results (JUnit XML, Cucumber JSON, Playwright JSON); this workflow downloads
+# them and emits report-bundle-{source} for audit-report.yml to merge.
+#
+# Use this when the test job is not one of the golden-path workflows, or when
+# you have not opted into their package-audit-reports / audit-packages inputs.
+#
+# Required caller permissions:
+#   contents: read
+#   actions: read
+#
+# No top-level concurrency — put it on the caller only.
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: >-
+          Newline-separated `category|source|glob[|glob...]` lines (source may
+          be omitted when `source` is set). Categories: unit, integration,
+          acceptance (alias api), system (alias ui), performance.
+        required: true
+        type: string
+      download-artifact-name:
+        description: "Exact artifact name to download. Empty uses download-artifact-pattern."
+        required: false
+        type: string
+        default: ""
+      download-artifact-pattern:
+        description: "Artifact name pattern when packaging several uploads from one job."
+        required: false
+        type: string
+        default: ""
+      source:
+        description: "Default source label for two-field package lines (category|glob)."
+        required: false
+        type: string
+        default: ""
+      job-name:
+        description: "Recorded in _meta.json as the producing job."
+        required: false
+        type: string
+        default: ""
+      skip-reason:
+        description: "Written into _meta.json when a glob matches nothing."
+        required: false
+        type: string
+        default: "No matching result files were found for this category"
+      fail-if-empty:
+        description: "Fail this job when every glob matched nothing."
+        required: false
+        type: boolean
+        default: false
+      artifact-retention-days:
+        required: false
+        type: number
+        default: 14
+      runs-on:
+        required: false
+        type: string
+        default: "ubuntu-latest"
+    outputs:
+      artifact-name:
+        description: "Uploaded report-bundle-* artifact name."
+        value: ${{ jobs.package.outputs.artifact-name }}
+
+jobs:
+  package:
+    name: Package ${{ inputs.source || inputs.job-name || 'test' }} reports for audit PDF
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-name: ${{ steps.package.outputs.artifact-name }}
+    steps:
+      - name: Require an artifact to download
+        if: inputs.download-artifact-name == '' && inputs.download-artifact-pattern == ''
+        shell: bash
+        run: |
+          echo "::error title=package-test-report::Set download-artifact-name or download-artifact-pattern"
+          exit 1
+
+      - name: Download named artifact
+        if: inputs.download-artifact-name != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ inputs.download-artifact-name }}
+          path: downloaded
+
+      - name: Download artifact pattern
+        if: inputs.download-artifact-name == '' && inputs.download-artifact-pattern != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: ${{ inputs.download-artifact-pattern }}
+          path: downloaded
+          merge-multiple: true
+
+      - id: package
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/generate-executive-test-report@v1
+        with:
+          mode: package
+          packages: ${{ inputs.packages }}
+          source: ${{ inputs.source }}
+          job-name: ${{ inputs.job-name }}
+          source-dir: downloaded
+          skip-reason: ${{ inputs.skip-reason }}
+          fail-if-empty: ${{ inputs.fail-if-empty }}
+          artifact-retention-days: ${{ inputs.artifact-retention-days }}

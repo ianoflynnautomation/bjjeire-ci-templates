@@ -1,0 +1,47 @@
+# Example caller: dedicated compliance pack that re-runs unit/integration.
+# Prefer collect-then-merge on PR/main (see examples/audit-report.yml).
+# Copy to .github/workflows/audit-release.yml in the application repo.
+name: Audit Release Report
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      seed_samples:
+        description: "Use bundled Cucumber/Playwright fixtures (demo the PDF only)."
+        type: boolean
+        default: false
+      attach_to_tag:
+        description: "Existing release tag to attach the PDF to. Empty skips attach."
+        type: string
+        required: false
+        default: ""
+      environment:
+        description: "Target environment label"
+        type: choice
+        options: [Staging, Pre-Prod, Production-DryRun, CI]
+        default: Staging
+
+concurrency:
+  group: audit-release-${{ github.event.release.tag_name || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Compliance pack
+    permissions:
+      contents: write
+      actions: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/audit-release.yml@v1
+    with:
+      java-working-directory: src/bjjeire-api
+      frontend-working-directory: src/bjjeire-app
+      environment: ${{ inputs.environment || 'Staging' }}
+      seed-samples: ${{ inputs.seed_samples || false }}
+      attach-to-tag: ${{ github.event.release.tag_name || inputs.attach_to_tag }}
+      product: BjjEire
+      title: Audit-Ready Compliance Release Report

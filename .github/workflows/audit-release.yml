@@ -1,0 +1,330 @@
+name: Audit Release Report (Reusable)
+
+# Dedicated four-stage pack that re-runs unit/integration and stages
+# acceptance/system (or seeds fixtures). Prefer audit-report.yml on PR/main:
+# package live outputs after each test job, then merge — do not re-run.
+#
+# Missing artifacts fail the gate as MISSING / CRITICAL FAILURE; the PDF still
+# generates. Playwright is collected or seeded — never run against production.
+#
+# Required caller permissions:
+#   contents: write     # attach PDF when attach-to-tag is set
+#   actions: read
+#
+# No top-level concurrency — put it on the caller only.
+
+on:
+  workflow_call:
+    inputs:
+      java-working-directory:
+        description: "Directory containing pom.xml. Empty skips Maven."
+        type: string
+        required: false
+        default: ""
+      frontend-working-directory:
+        description: "Directory containing package.json. Empty skips Vitest."
+        type: string
+        required: false
+        default: ""
+      java-version:
+        type: string
+        required: false
+        default: "25"
+      frontend-unit-project:
+        type: string
+        required: false
+        default: "unit"
+      frontend-integration-project:
+        type: string
+        required: false
+        default: "integration"
+      frontend-env:
+        description: "Newline-separated KEY=VALUE pairs for Vitest (non-secret)."
+        type: string
+        required: false
+        default: "HUSKY=0"
+      environment:
+        description: "Target environment label (Staging, Pre-Prod, Production-DryRun)."
+        type: string
+        required: false
+        default: "CI"
+      seed-samples:
+        description: "Use bundled Cucumber/Playwright fixtures (demo only)."
+        type: boolean
+        required: false
+        default: false
+      attach-to-tag:
+        description: "GitHub release tag to attach the PDF to. Empty skips attach."
+        type: string
+        required: false
+        default: ""
+      title:
+        type: string
+        required: false
+        default: "Audit-Ready Compliance Release Report"
+      product:
+        type: string
+        required: false
+        default: "Application"
+      artifact-name:
+        type: string
+        required: false
+        default: "audit-release-report"
+      artifact-retention-days:
+        type: number
+        required: false
+        default: 90
+      fail-on-test-failure:
+        description: "Fail publish when any required gate is Failed or MISSING."
+        type: boolean
+        required: false
+        default: true
+      runs-on:
+        type: string
+        required: false
+        default: "ubuntu-latest"
+    outputs:
+      verdict:
+        description: "PASS | FAIL"
+        value: ${{ jobs.audit.outputs.verdict }}
+      release-id:
+        description: "REL-YYYYMMDD-<shortsha>"
+        value: ${{ jobs.audit.outputs.release-id }}
+      report-artifact-name:
+        value: ${{ jobs.audit.outputs.report-artifact-name }}
+
+jobs:
+  unit_integration:
+    name: Unit & Integration
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK
+        if: inputs.java-working-directory != ''
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961  # v5.7.0
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+          cache-dependency-path: ${{ inputs.java-working-directory }}/pom.xml
+
+      - name: Maven unit tests (Surefire)
+        id: java_unit
+        if: inputs.java-working-directory != ''
+        continue-on-error: true
+        working-directory: ${{ inputs.java-working-directory }}
+        run: mvn --batch-mode --no-transfer-progress test
+
+      - name: Maven integration tests (Failsafe)
+        id: java_it
+        if: inputs.java-working-directory != ''
+        continue-on-error: true
+        working-directory: ${{ inputs.java-working-directory }}
+        run: mvn --batch-mode --no-transfer-progress verify -DskipTests
+
+      - name: Frontend unit tests
+        id: fe_unit
+        if: inputs.frontend-working-directory != ''
+        continue-on-error: true
+        working-directory: ${{ inputs.frontend-working-directory }}
+        env:
+          UNIT_PROJECT: ${{ inputs.frontend-unit-project }}
+          FRONTEND_ENV: ${{ inputs.frontend-env }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r line || [ -n "$line" ]; do
+            [ -z "$line" ] && continue
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "$FRONTEND_ENV"
+          mkdir -p "${{ github.workspace }}/results/unit"
+          npm ci --ignore-scripts
+          npx vitest run --project "${UNIT_PROJECT}" --reporter=default --reporter=junit \
+            --outputFile="${{ github.workspace }}/results/unit/frontend-unit.xml"
+
+      - name: Frontend integration tests
+        id: fe_it
+        if: inputs.frontend-working-directory != ''
+        continue-on-error: true
+        working-directory: ${{ inputs.frontend-working-directory }}
+        env:
+          IT_PROJECT: ${{ inputs.frontend-integration-project }}
+          FRONTEND_ENV: ${{ inputs.frontend-env }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r line || [ -n "$line" ]; do
+            [ -z "$line" ] && continue
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "$FRONTEND_ENV"
+          mkdir -p "${{ github.workspace }}/results/integration"
+          npm ci --ignore-scripts
+          npx vitest run --project "${IT_PROJECT}" --reporter=default --reporter=junit \
+            --outputFile="${{ github.workspace }}/results/integration/frontend-integration.xml"
+
+      - name: Stage JUnit artifacts
+        if: always()
+        env:
+          JAVA_DIR: ${{ inputs.java-working-directory }}
+          JAVA_UNIT: ${{ steps.java_unit.outcome }}
+          JAVA_IT: ${{ steps.java_it.outcome }}
+          FE_UNIT: ${{ steps.fe_unit.outcome }}
+          FE_IT: ${{ steps.fe_it.outcome }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          mkdir -p results/unit results/integration
+          if [ -n "${JAVA_DIR}" ]; then
+            cp "${JAVA_DIR}"/target/surefire-reports/TEST-*.xml results/unit/ 2>/dev/null || true
+            cp "${JAVA_DIR}"/target/failsafe-reports/TEST-*.xml results/integration/ 2>/dev/null || true
+          fi
+          python3 - <<'PY'
+          import json, os, pathlib
+          def write(path, status, reason):
+              pathlib.Path(path).write_text(json.dumps({
+                  "status": status, "reason": reason, "job": "unit_integration",
+                  "environment": os.environ["ENVIRONMENT"],
+              }) + "\n")
+          write("results/unit/_meta.json",
+                "success" if os.environ.get("JAVA_UNIT","skipped") in ("success","skipped") and os.environ.get("FE_UNIT","skipped") in ("success","skipped") else "failed",
+                f"maven={os.environ.get('JAVA_UNIT')} vitest={os.environ.get('FE_UNIT')}")
+          write("results/integration/_meta.json",
+                "success" if os.environ.get("JAVA_IT","skipped") in ("success","skipped") and os.environ.get("FE_IT","skipped") in ("success","skipped") else "failed",
+                f"maven={os.environ.get('JAVA_IT')} vitest={os.environ.get('FE_IT')}")
+          PY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: report-unit
+          path: results/unit/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: report-integration
+          path: results/integration/
+          if-no-files-found: warn
+          retention-days: 14
+
+  acceptance:
+    name: Acceptance Tests
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: ianoflynnautomation/bjjeire-ci-templates/actions/generate-executive-test-report@v1
+        with:
+          mode: stage
+          category: acceptance
+          destination: results/acceptance
+          seed-samples: ${{ inputs.seed-samples }}
+          skip-reason: >-
+            Acceptance artifacts (Cucumber JSON) were not uploaded. Gate is
+            MISSING / CRITICAL FAILURE until a cucumber.json is placed in results/acceptance/.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: report-acceptance
+          path: results/acceptance/
+          retention-days: 14
+
+  system:
+    name: System / E2E Tests
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: ianoflynnautomation/bjjeire-ci-templates/actions/generate-executive-test-report@v1
+        with:
+          mode: stage
+          category: system
+          destination: results/system
+          seed-samples: ${{ inputs.seed-samples }}
+          skip-reason: >-
+            System/E2E artifacts (Playwright JSON or JUnit XML) were not uploaded.
+            Collect from playwright-tests.yml; do not run browsers against production.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: report-system
+          path: results/system/
+          retention-days: 14
+
+  audit:
+    name: Audit Report
+    needs: [unit_integration, acceptance, system]
+    if: always()
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      verdict: ${{ steps.generate.outputs.verdict }}
+      release-id: ${{ steps.release_id.outputs.id }}
+      report-artifact-name: ${{ inputs.artifact-name }}
+    steps:
+      - name: Download category artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: report-*
+          path: collected
+          merge-multiple: false
+
+      - name: Layout packaged artifacts
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/generate-executive-test-report@v1
+        with:
+          mode: layout
+          collected-dir: collected
+          results-dir: results
+
+      - id: generate
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/generate-executive-test-report@v1
+        with:
+          mode: generate
+          results-dir: results
+          output: artifacts/audit-release-report.pdf
+          summary-md: ${{ github.step_summary }}
+          verdict-json: artifacts/verdict.json
+          title: ${{ inputs.title }}
+          product: ${{ inputs.product }}
+          environment: ${{ inputs.environment }}
+          sha: ${{ github.sha }}
+          ref: ${{ github.ref }}
+          branch: ${{ github.ref_name }}
+          actor: ${{ github.actor }}
+          runner-host: ${{ runner.name }}
+          run-id: ${{ github.run_id }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          workflow: ${{ github.workflow }}
+          fail-on-test-failure: ${{ inputs.fail-on-test-failure }}
+
+      - id: release_id
+        if: always()
+        run: |
+          python3 -c 'import json,pathlib; p=pathlib.Path("artifacts/verdict.json"); print("id="+(json.loads(p.read_text())["release_id"] if p.exists() else "unknown"))' >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: |
+            artifacts/audit-release-report.pdf
+            artifacts/verdict.json
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+      - name: Attach PDF to GitHub Release
+        if: always() && hashFiles('artifacts/audit-release-report.pdf') != '' && inputs.attach-to-tag != ''
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
+        with:
+          tag_name: ${{ inputs.attach-to-tag }}
+          files: artifacts/audit-release-report.pdf
+          fail_on_unmatched_files: true

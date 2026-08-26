@@ -129,6 +129,21 @@ on:
         required: false
         type: number
         default: 15
+      package-audit-reports:
+        description: "Package merged Playwright JSON/JUnit for audit-report.yml after the merge job."
+        required: false
+        type: boolean
+        default: false
+      package-audit-source:
+        description: "Source label for the report-bundle artifact. Empty uses artifact-prefix."
+        required: false
+        type: string
+        default: ""
+      package-audit-category:
+        description: "Audit category for the merged Playwright results (system, acceptance, or api)."
+        required: false
+        type: string
+        default: "system"
     outputs:
       status:
         description: "success | failure — the gated result of the upstream test job."
@@ -428,3 +443,32 @@ jobs:
           fi
           echo "::notice title=Gate passed::Upstream test job result was '${TEST_RESULT}' (flaky: ${FLAKY:-0})"
           echo "status=success" >> "$GITHUB_OUTPUT"
+
+  package-audit:
+    name: Package audit reports
+    runs-on: ${{ inputs.runs-on }}
+    needs: [merge]
+    if: ${{ always() && inputs.package-audit-reports && needs.merge.outputs.report_ready == 'true' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ inputs.artifact-prefix }}-json-results
+          path: pw
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        continue-on-error: true
+        with:
+          name: ${{ inputs.artifact-prefix }}-junit
+          path: pw
+      - uses: ianoflynnautomation/bjjeire-ci-templates/actions/generate-executive-test-report@v1
+        with:
+          mode: package
+          source: ${{ inputs.package-audit-source != '' && inputs.package-audit-source || inputs.artifact-prefix }}
+          job-name: playwright-merge
+          source-dir: pw
+          packages: |
+            ${{ inputs.package-audit-category }}|**/*.json|**/*.xml
+          skip-reason: Playwright JSON/JUnit was not uploaded by the merge job

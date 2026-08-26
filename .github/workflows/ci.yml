@@ -48,3 +48,44 @@ jobs:
           echo "::endgroup::"
           shellcheck --severity=style --format=gcc "${scripts[@]}"
           echo "::notice title=Shellcheck::${#scripts[@]} script(s) clean"
+
+  audit_report:
+    name: Audit Report Generator
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: actions/generate-executive-test-report
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be387cdfc3e90be4dbab78a44a24fa7ee  # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: actions/generate-executive-test-report/requirements-dev.txt
+      - name: Install and test
+        run: |
+          set -euo pipefail
+          pip install -r requirements-dev.txt
+          python -m unittest discover -s tests -v
+      - name: Preview report (no viewer)
+        run: |
+          set -euo pipefail
+          python preview_report.py --clean --no-open
+          test -s out/audit-release-report.pdf
+          test -s out/summary.md
+          python -c 'import json; v=json.load(open("out/verdict.json")); print(v["release_id"], v["verdict"], len(v["catalog"]))'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: audit-report-preview
+          path: |
+            actions/generate-executive-test-report/out/audit-release-report.pdf
+            actions/generate-executive-test-report/out/summary.md
+            actions/generate-executive-test-report/out/verdict.json
+          if-no-files-found: warn
+          retention-days: 7

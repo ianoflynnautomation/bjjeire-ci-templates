@@ -65,7 +65,24 @@ jobs:
 
       publish-report: false
       comment-on-pr: true
+      package-audit-reports: true
+      package-audit-source: compose
+      package-audit-category: system
     secrets:
       test-env-vars: |
         PW_TEST_USER=${{ secrets.PW_TEST_USER }}
         PW_TEST_PASSWORD=${{ secrets.PW_TEST_PASSWORD }}
+
+  audit-report:
+    name: Audit Report
+    needs: [smoke]
+    if: always()
+    permissions:
+      contents: write
+      actions: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/audit-report.yml@v1
+    with:
+      product: My Product
+      environment: CI
+      strict-missing: false
+      fail-on-test-failure: true

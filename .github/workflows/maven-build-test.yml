@@ -69,6 +69,19 @@ on:
         required: false
         type: number
         default: 1
+      package-audit-reports:
+        description: >-
+          Package Surefire as unit and Failsafe as integration for
+          audit-report.yml (uploads report-bundle-{source}). Any Maven caller
+          can opt in; no extra job in the caller.
+        required: false
+        type: boolean
+        default: false
+      package-audit-source:
+        description: "Source label in the report-bundle artifact name. Change it when two Maven jobs run in one workflow."
+        required: false
+        type: string
+        default: "maven"
     outputs:
       build-successful:
         description: "true when the Maven build (including tests) succeeded."
@@ -125,6 +138,20 @@ jobs:
             ${{ inputs.working-directory }}/**/target/failsafe-reports/*.xml
           if-no-files-found: warn
           retention-days: ${{ inputs.artifact-retention-days }}
+
+      - name: Package audit reports
+        if: always() && inputs.package-audit-reports && steps.verify_step.outcome != 'skipped'
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/generate-executive-test-report@v1
+        with:
+          mode: package
+          source: ${{ inputs.package-audit-source }}
+          job-name: maven-verify
+          source-dir: ${{ inputs.working-directory }}
+          packages: |
+            unit|**/surefire-reports/*.xml
+            integration|**/failsafe-reports/*.xml
+          skip-reason: Surefire/Failsafe XML was not produced
+          artifact-retention-days: "14"
 
       - name: Write build summary
         if: always()

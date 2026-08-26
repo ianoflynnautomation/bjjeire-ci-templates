@@ -1,0 +1,395 @@
+name: Generate executive test report
+description: >-
+  Package live test outputs after a job, lay out report-* artifacts, run k6,
+  or combine JUnit / Playwright / k6 / Lighthouse into one PDF + Step Summary.
+
+inputs:
+  mode:
+    description: "generate | package | layout | stage | k6"
+    required: false
+    default: generate
+
+  category:
+    description: "For mode=stage|package: unit | integration | acceptance | system | api | ui | performance"
+    required: false
+    default: ""
+  destination:
+    description: "Directory to write staged files or k6 output into"
+    required: false
+    default: results
+  seed-samples:
+    description: "When true, copy bundled fixtures instead of marking the suite missing"
+    required: false
+    default: "false"
+  skip-reason:
+    description: "Written into _meta.json when the suite is not run or no files matched"
+    required: false
+    default: "Suite was not collected in this run"
+  source:
+    description: "For mode=package: origin label (java, frontend, compose). Used in artifact name report-{category}-{source}"
+    required: false
+    default: ""
+  source-dir:
+    description: "For mode=package: directory to search for globs (typically a downloaded artifact)"
+    required: false
+    default: "."
+  globs:
+    description: "For mode=package: newline-separated glob patterns relative to source-dir (single category)"
+    required: false
+    default: ""
+  packages:
+    description: >-
+      For mode=package: newline-separated `category|source|glob[|glob...]` lines
+      (source optional when `source` is set). Uploads one report-bundle-{source}
+      artifact. Prefer this for multi-suite jobs; any team can reuse it.
+    required: false
+    default: ""
+  job-name:
+    description: "For mode=package: recorded in _meta.json as the producing job"
+    required: false
+    default: ""
+  upload-artifact:
+    description: "For mode=package: upload the staged directory as report-{category}[-{source}]"
+    required: false
+    default: "true"
+  artifact-name:
+    description: "Override the uploaded artifact name (mode=package)"
+    required: false
+    default: ""
+  artifact-retention-days:
+    description: "Retention days for packaged report-* artifacts"
+    required: false
+    default: "14"
+  fail-if-empty:
+    description: "For mode=package: fail the step when no files matched"
+    required: false
+    default: "false"
+
+  collected-dir:
+    description: "For mode=layout: directory of downloaded report-* artifacts"
+    required: false
+    default: collected
+  results-dir:
+    description: "Root with unit/integration/acceptance/system subdirs (mode=generate|layout)"
+    required: false
+    default: results
+
+  api-url:
+    description: "For mode=k6: target base URL (non-production)"
+    required: false
+    default: ""
+  production-hosts:
+    description: "Comma-separated hostnames k6 must refuse"
+    required: false
+    default: ""
+  k6-image:
+    description: "grafana/k6 image for mode=k6"
+    required: false
+    default: "grafana/k6:0.57.0"
+
+  output:
+    description: "PDF output path"
+    required: false
+    default: artifacts/executive-test-report.pdf
+  summary-md:
+    description: "Markdown file to append (typically $GITHUB_STEP_SUMMARY)"
+    required: false
+    default: ""
+  verdict-json:
+    description: "Optional JSON verdict path"
+    required: false
+    default: artifacts/verdict.json
+  title:
+    required: false
+    default: Executive Test Report
+  product:
+    required: false
+    default: Application
+  sha:
+    required: false
+    default: unknown
+  ref:
+    required: false
+    default: unknown
+  run-url:
+    required: false
+    default: ""
+  workflow:
+    required: false
+    default: audit-release
+  environment:
+    description: "Target environment label (Staging, Pre-Prod, Production-DryRun)"
+    required: false
+    default: CI
+  branch:
+    required: false
+    default: ""
+  actor:
+    required: false
+    default: ""
+  runner-host:
+    required: false
+    default: ""
+  run-id:
+    required: false
+    default: ""
+  fail-on-test-failure:
+    description: "Fail the step when the combined verdict is FAIL"
+    required: false
+    default: "true"
+  required-categories:
+    description: "Comma-separated gates that must Pass (default unit,integration,acceptance,system)"
+    required: false
+    default: "unit,integration,acceptance,system"
+  strict-missing:
+    description: "When true, a missing required gate fails the verdict. Set false on path-filtered PR/main runs."
+    required: false
+    default: "true"
+  python-version:
+    required: false
+    default: "3.12"
+
+outputs:
+  verdict:
+    description: "PASS | FAIL"
+    value: ${{ steps.generate.outputs.verdict }}
+  pdf:
+    description: "Path of the generated PDF"
+    value: ${{ steps.generate.outputs.pdf }}
+  artifact-name:
+    description: "Uploaded report-* artifact name (mode=package)"
+    value: ${{ steps.package.outputs.artifact-name }}
+  packaged-category:
+    description: "Canonical category packaged (mode=package)"
+    value: ${{ steps.package.outputs.category }}
+
+runs:
+  using: composite
+  steps:
+    - name: Package category
+      if: inputs.mode == 'package'
+      id: package
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        CATEGORY: ${{ inputs.category }}
+        DEST: ${{ inputs.destination }}
+        SOURCE: ${{ inputs.source }}
+        SOURCE_DIR: ${{ inputs.source-dir }}
+        GLOBS: ${{ inputs.globs }}
+        PACKAGES: ${{ inputs.packages }}
+        JOB_NAME: ${{ inputs.job-name }}
+        REASON: ${{ inputs.skip-reason }}
+        FAIL_EMPTY: ${{ inputs.fail-if-empty }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+      run: |
+        set -euo pipefail
+        dest="${DEST}"
+        extra=()
+        if [ "${FAIL_EMPTY}" = "true" ]; then extra+=(--fail-if-empty); fi
+        if [ -n "${PACKAGES}" ]; then
+          if [ -z "${dest}" ] || [ "${dest}" = "results" ]; then
+            dest="staged/bundle"
+          fi
+          python3 "${ACTION_PATH}/package_results.py" package-many \
+            --packages "${PACKAGES}" \
+            --source-dir "${SOURCE_DIR}" \
+            --destination "${dest}" \
+            --source "${SOURCE}" \
+            --job "${JOB_NAME}" \
+            --skip-reason "${REASON}" \
+            --github-output "${GITHUB_OUTPUT}" \
+            "${extra[@]}"
+        else
+          : "${CATEGORY:?category or packages is required for mode=package}"
+          if [ -z "${dest}" ] || [ "${dest}" = "results" ]; then
+            dest="staged/${CATEGORY}"
+          fi
+          python3 "${ACTION_PATH}/package_results.py" package \
+            --category "${CATEGORY}" \
+            --source-dir "${SOURCE_DIR}" \
+            --destination "${dest}" \
+            --globs "${GLOBS}" \
+            --source "${SOURCE}" \
+            --job "${JOB_NAME}" \
+            --skip-reason "${REASON}" \
+            --github-output "${GITHUB_OUTPUT}" \
+            "${extra[@]}"
+        fi
+        if [ -n "${ARTIFACT_NAME}" ]; then
+          echo "artifact-name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+        fi
+        echo "destination=${dest}" >> "$GITHUB_OUTPUT"
+
+    - name: Upload packaged category
+      if: inputs.mode == 'package' && inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: ${{ steps.package.outputs.artifact-name }}
+        path: ${{ steps.package.outputs.destination }}
+        if-no-files-found: warn
+        retention-days: ${{ inputs.artifact-retention-days }}
+
+    - name: Layout packaged artifacts
+      if: inputs.mode == 'layout'
+      id: layout
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        COLLECTED: ${{ inputs.collected-dir }}
+        RESULTS: ${{ inputs.results-dir }}
+      run: |
+        set -euo pipefail
+        python3 "${ACTION_PATH}/package_results.py" layout \
+          --collected-dir "${COLLECTED}" \
+          --results-dir "${RESULTS}" \
+          --github-output "${GITHUB_OUTPUT}"
+        find "${RESULTS}" -type f | sort
+
+    - name: Stage category
+      if: inputs.mode == 'stage'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        CATEGORY: ${{ inputs.category }}
+        DEST: ${{ inputs.destination }}
+        SEED: ${{ inputs.seed-samples }}
+        REASON: ${{ inputs.skip-reason }}
+      run: |
+        set -euo pipefail
+        : "${CATEGORY:?category is required for mode=stage}"
+        mkdir -p "${DEST}"
+        fixtures="${ACTION_PATH}/fixtures"
+        if [ "${SEED}" = "true" ]; then
+          case "${CATEGORY}" in
+            api|acceptance) cp "${fixtures}/cucumber.sample.json" "${DEST}/cucumber.json" ;;
+            ui|system) cp "${fixtures}/playwright-ui.sample.json" "${DEST}/playwright.json" ;;
+            performance)
+              cp "${fixtures}/k6-summary.sample.json" "${DEST}/k6-summary.json"
+              cp "${fixtures}/lighthouse.sample.json" "${DEST}/lighthouse.json"
+              ;;
+            unit|integration) cp "${fixtures}/junit-sample.xml" "${DEST}/junit-sample.xml" ;;
+            *) echo "::error title=Unknown category::${CATEGORY}"; exit 1 ;;
+          esac
+          printf '%s\n' "{\"status\":\"sample\",\"reason\":\"seed-samples=true — bundled ${CATEGORY} fixture, not a live run\",\"job\":\"${CATEGORY}\"}" > "${DEST}/_meta.json"
+        else
+          python3 -c 'import json,os,pathlib; pathlib.Path(os.environ["DEST"]).joinpath("_meta.json").write_text(json.dumps({"status":"skipped","reason":os.environ["REASON"],"job":os.environ["CATEGORY"]})+"\n")'
+        fi
+
+    - name: Refuse production k6 targets
+      if: inputs.mode == 'k6'
+      id: k6_target
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        PRODUCTION_HOSTS: ${{ inputs.production-hosts }}
+        DEST: ${{ inputs.destination }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${DEST}"
+        if [ -z "${API_URL}" ]; then
+          echo "mode=missing" >> "$GITHUB_OUTPUT"
+          python3 -c 'import json,os,pathlib; pathlib.Path(os.environ["DEST"]).joinpath("_meta.json").write_text(json.dumps({"status":"skipped","reason":"api-url is unset. k6 catalog smoke did not run."})+"\n")'
+          exit 0
+        fi
+        host="${API_URL#https://}"; host="${host#http://}"; host="${host%%/*}"
+        IFS=',' read -r -a denied <<< "${PRODUCTION_HOSTS}"
+        for d in "${denied[@]}"; do
+          d="${d#"${d%%[![:space:]]*}"}"; d="${d%"${d##*[![:space:]]}"}"
+          [ -z "$d" ] && continue
+          if [ "$host" = "$d" ]; then
+            echo "::error title=Refusing production::${API_URL} matches denied host ${d}"
+            exit 1
+          fi
+        done
+        echo "mode=k6" >> "$GITHUB_OUTPUT"
+
+    - name: Run k6 catalog smoke
+      if: inputs.mode == 'k6' && steps.k6_target.outputs.mode == 'k6'
+      continue-on-error: true
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        DEST: ${{ inputs.destination }}
+        ACTION_PATH: ${{ github.action_path }}
+        K6_IMAGE: ${{ inputs.k6-image }}
+      run: |
+        set -euo pipefail
+        docker run --rm \
+          -e API_URL \
+          -v "${ACTION_PATH}:/src:ro" \
+          -v "${{ github.workspace }}/${DEST}:/out" \
+          "${K6_IMAGE}" \
+          run --summary-export=/out/k6-summary.json \
+          /src/k6/catalog-smoke.js
+        python3 -c 'import json,os,pathlib; pathlib.Path(os.environ["DEST"]).joinpath("_meta.json").write_text(json.dumps({"status":"success","reason":"k6 catalog smoke"})+"\n")'
+
+    - name: Set up Python
+      if: inputs.mode == 'generate'
+      uses: actions/setup-python@a26af69be387cdfc3e90be4dbab78a44a24fa7ee  # v5.6.0
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: pip
+        cache-dependency-path: ${{ github.action_path }}/requirements.txt
+
+    - name: Install generator
+      if: inputs.mode == 'generate'
+      shell: bash
+      run: pip install -r "${{ github.action_path }}/requirements.txt"
+
+    - name: Parser self-check
+      if: inputs.mode == 'generate'
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: python -m unittest discover -s tests -v
+
+    - name: Generate PDF
+      if: inputs.mode == 'generate'
+      id: generate
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        RESULTS_DIR: ${{ inputs.results-dir }}
+        OUTPUT: ${{ inputs.output }}
+        SUMMARY_MD: ${{ inputs.summary-md }}
+        VERDICT_JSON: ${{ inputs.verdict-json }}
+        TITLE: ${{ inputs.title }}
+        PRODUCT: ${{ inputs.product }}
+        SHA: ${{ inputs.sha }}
+        REF: ${{ inputs.ref }}
+        RUN_URL: ${{ inputs.run-url }}
+        WORKFLOW: ${{ inputs.workflow }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        BRANCH: ${{ inputs.branch }}
+        ACTOR: ${{ inputs.actor }}
+        RUNNER_HOST: ${{ inputs.runner-host }}
+        RUN_ID: ${{ inputs.run-id }}
+        FAIL: ${{ inputs.fail-on-test-failure }}
+        REQUIRED: ${{ inputs.required-categories }}
+        STRICT_MISSING: ${{ inputs.strict-missing }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "${OUTPUT}")"
+        extra=()
+        if [ -n "${SUMMARY_MD}" ]; then extra+=(--summary-md "${SUMMARY_MD}"); fi
+        if [ -n "${VERDICT_JSON}" ]; then extra+=(--verdict-json "${VERDICT_JSON}"); fi
+        if [ "${FAIL}" = "true" ]; then extra+=(--fail-on-test-failure); fi
+        if [ "${STRICT_MISSING}" != "true" ]; then extra+=(--no-strict-missing); fi
+        python "${ACTION_PATH}/generate_report.py" \
+          --results-dir "${RESULTS_DIR}" \
+          --output "${OUTPUT}" \
+          --title "${TITLE}" \
+          --product "${PRODUCT}" \
+          --sha "${SHA}" \
+          --ref "${REF}" \
+          --branch "${BRANCH}" \
+          --environment "${ENVIRONMENT}" \
+          --runner-host "${RUNNER_HOST}" \
+          --actor "${ACTOR}" \
+          --run-id "${RUN_ID}" \
+          --run-url "${RUN_URL}" \
+          --workflow "${WORKFLOW}" \
+          --required-categories "${REQUIRED}" \
+          "${extra[@]}"
+        echo "pdf=${OUTPUT}" >> "$GITHUB_OUTPUT"
+        python3 -c 'import json,os; print("verdict="+json.load(open(os.environ["VERDICT_JSON"]))["verdict"])' >> "$GITHUB_OUTPUT"

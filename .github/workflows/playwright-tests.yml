@@ -208,6 +208,21 @@ on:
         required: false
         type: string
         default: "playwright"
+      package-audit-reports:
+        description: "Package merged Playwright JSON/JUnit for audit-report.yml."
+        required: false
+        type: boolean
+        default: false
+      package-audit-source:
+        description: "Source label for the report-bundle artifact. Empty uses artifact-prefix."
+        required: false
+        type: string
+        default: ""
+      package-audit-category:
+        description: "Audit category for the merged Playwright results (system, acceptance, or api)."
+        required: false
+        type: string
+        default: "system"
       trace-retention-days:
         description: "Retention in days for the failure trace artifacts."
         required: false
@@ -451,4 +466,7 @@ jobs:
       fail-on-flaky: ${{ inputs.fail-on-flaky }}
       publish-report: ${{ inputs.publish-report }}
       artifact-prefix: ${{ inputs.artifact-prefix }}
+      package-audit-reports: ${{ inputs.package-audit-reports }}
+      package-audit-source: ${{ inputs.package-audit-source }}
+      package-audit-category: ${{ inputs.package-audit-category }}
       runs-on: ${{ inputs.report-runs-on }}

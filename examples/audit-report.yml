@@ -1,0 +1,92 @@
+# Collect-then-merge audit PDF — copy the jobs that match how you run tests.
+#
+# Preferred: opt in on the golden-path test workflows, then call audit-report.yml.
+# Custom test jobs: call package-test-report.yml with a packages spec.
+# Pin @v1 to a SHA after the templates change is merged.
+
+name: CI PR Validation (audit excerpt)
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  java:
+    permissions:
+      contents: read
+      checks: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/maven-build-test.yml@v1
+    with:
+      working-directory: src/my-api
+      maven-goals: verify
+      publish-test-report: true
+      package-audit-reports: true
+      package-audit-source: java
+
+  frontend:
+    permissions:
+      contents: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/node-build-test.yml@v1
+    with:
+      working-directory: src/my-app
+      commands: |
+        mkdir -p test-results
+        npx vitest run --project unit --reporter=default --reporter=junit --outputFile.junit=test-results/vitest-unit.xml
+        npx vitest run --project integration --reporter=default --reporter=junit --outputFile.junit=test-results/vitest-integration.xml
+      artifact-name: frontend-test-results
+      artifact-path: src/my-app/test-results/*.xml
+      upload-artifact-always: true
+      audit-source: frontend
+      audit-packages: |
+        unit|**/vitest-unit.xml
+        integration|**/vitest-integration.xml
+
+  smoke:
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/playwright-docker-tests.yml@v1
+    with:
+      playwright-projects: chromium-desktop
+      base-url: http://localhost:3000
+      api-url: http://localhost:5003
+      package-audit-reports: true
+      package-audit-source: compose
+      package-audit-category: system
+
+  # package_custom:
+  #   needs: my_custom_tests
+  #   if: always() && (needs.my_custom_tests.result == 'success' || needs.my_custom_tests.result == 'failure')
+  #   permissions:
+  #     contents: read
+  #     actions: read
+  #   uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/package-test-report.yml@v1
+  #   with:
+  #     download-artifact-name: my-junit-results
+  #     source: custom
+  #     job-name: my_custom_tests
+  #     packages: |
+  #       unit|**/*.xml
+
+  audit_report:
+    name: Audit Report
+    needs: [java, frontend, smoke]
+    if: always()
+    permissions:
+      contents: write
+      actions: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/audit-report.yml@v1
+    with:
+      product: My Product
+      environment: CI
+      # Path-filtered PR: missing suites stay visible as MISSING in the PDF
+      # but do not fail this job. Failed packaged tests still fail.
+      strict-missing: false
+      fail-on-test-failure: true
+      # On a published GitHub Release, attach the PDF:
+      # attach-to-tag: ${{ github.event.release.tag_name }}

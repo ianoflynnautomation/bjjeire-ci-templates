@@ -52,7 +52,14 @@ jobs:
         npx tsc --noEmit
         npx eslint src --max-warnings 0
         npx prettier --check src/
-        npm test
+        mkdir -p test-results
+        npx vitest run --reporter=default --reporter=junit --outputFile.junit=test-results/vitest-unit.xml
+      artifact-name: frontend-unit-results
+      artifact-path: src/my-app/test-results/*.xml
+      upload-artifact-always: true
+      audit-source: frontend
+      audit-packages: |
+        unit|**/vitest-unit.xml
 
   build:
     name: Build Frontend
@@ -101,12 +108,26 @@ jobs:
         src/my-app/src/**/__traces__
         src/my-app/src/**/__screenshots__
 
+  audit-report:
+    name: Audit Report
+    needs: [checks]
+    if: always()
+    permissions:
+      contents: write
+      actions: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/audit-report.yml@v1
+    with:
+      product: My App
+      environment: CI
+      strict-missing: false
+      fail-on-test-failure: true
+
   pr-complete:
     name: PR Checks Complete
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [detect-changes, checks, build, coverage, browser]
+    needs: [detect-changes, checks, build, coverage, browser, audit-report]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:

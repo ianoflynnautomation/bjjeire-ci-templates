@@ -1,0 +1,160 @@
+name: Audit Report (Reusable)
+
+# Merge-only compliance pack. Call this after each test job has packaged its
+# outputs with generate-executive-test-report (mode=package). This workflow
+# does not re-run tests.
+#
+# Caller pattern:
+#   1. Test job uploads raw results (surefire, vitest JUnit, Playwright JSON).
+#   2. Follow-on job (if: always()) downloads those artifacts and calls
+#      generate-executive-test-report@v1 with mode=package, category, globs.
+#      That uploads report-{category}[-{source}].
+#   3. This workflow downloads report-*, lays them out, writes the PDF, and
+#      optionally attaches it to a GitHub Release.
+#
+# Path-filtered PR/main runs should set strict-missing: false so a skipped
+# suite is visible as MISSING in the PDF but does not fail the merge job.
+# Release / dispatch packs should keep the default (strict-missing: true).
+#
+# Required caller permissions:
+#   contents: write     # attach PDF when attach-to-tag is set
+#   actions: read
+#
+# No top-level concurrency — put it on the caller only.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment label (Staging, Pre-Prod, Production-DryRun, CI)."
+        type: string
+        required: false
+        default: "CI"
+      title:
+        type: string
+        required: false
+        default: "Audit-Ready Compliance Release Report"
+      product:
+        type: string
+        required: false
+        default: "Application"
+      artifact-name:
+        type: string
+        required: false
+        default: "audit-release-report"
+      artifact-retention-days:
+        type: number
+        required: false
+        default: 90
+      fail-on-test-failure:
+        description: "Fail this job when the combined verdict is FAIL."
+        type: boolean
+        required: false
+        default: true
+      required-categories:
+        description: "Comma-separated gates that must Pass."
+        type: string
+        required: false
+        default: "unit,integration,acceptance,system"
+      strict-missing:
+        description: "Fail the verdict when a required gate has no artifacts. False for path-filtered PR/main."
+        type: boolean
+        required: false
+        default: true
+      attach-to-tag:
+        description: "GitHub release tag to attach the PDF to. Empty skips attach."
+        type: string
+        required: false
+        default: ""
+      download-pattern:
+        description: "Artifact name pattern produced by mode=package jobs."
+        type: string
+        required: false
+        default: "report-*"
+      runs-on:
+        type: string
+        required: false
+        default: "ubuntu-latest"
+    outputs:
+      verdict:
+        description: "PASS | FAIL"
+        value: ${{ jobs.audit.outputs.verdict }}
+      release-id:
+        description: "REL-YYYYMMDD-<shortsha>"
+        value: ${{ jobs.audit.outputs.release-id }}
+      report-artifact-name:
+        value: ${{ jobs.audit.outputs.report-artifact-name }}
+
+jobs:
+  audit:
+    name: Audit report (${{ inputs.environment }})
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      verdict: ${{ steps.generate.outputs.verdict }}
+      release-id: ${{ steps.release_id.outputs.id }}
+      report-artifact-name: ${{ inputs.artifact-name }}
+    steps:
+      - name: Download packaged category artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        continue-on-error: true
+        with:
+          pattern: ${{ inputs.download-pattern }}
+          path: collected
+          merge-multiple: false
+
+      - name: Layout packaged artifacts
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/generate-executive-test-report@v1
+        with:
+          mode: layout
+          collected-dir: collected
+          results-dir: results
+
+      - id: generate
+        uses: ianoflynnautomation/bjjeire-ci-templates/actions/generate-executive-test-report@v1
+        with:
+          mode: generate
+          results-dir: results
+          output: artifacts/audit-release-report.pdf
+          summary-md: ${{ github.step_summary }}
+          verdict-json: artifacts/verdict.json
+          title: ${{ inputs.title }}
+          product: ${{ inputs.product }}
+          environment: ${{ inputs.environment }}
+          sha: ${{ github.sha }}
+          ref: ${{ github.ref }}
+          branch: ${{ github.ref_name }}
+          actor: ${{ github.actor }}
+          runner-host: ${{ runner.name }}
+          run-id: ${{ github.run_id }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          workflow: ${{ github.workflow }}
+          required-categories: ${{ inputs.required-categories }}
+          strict-missing: ${{ inputs.strict-missing }}
+          fail-on-test-failure: ${{ inputs.fail-on-test-failure }}
+
+      - id: release_id
+        if: always()
+        run: |
+          python3 -c 'import json,pathlib; p=pathlib.Path("artifacts/verdict.json"); print("id="+(json.loads(p.read_text())["release_id"] if p.exists() else "unknown"))' >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: |
+            artifacts/audit-release-report.pdf
+            artifacts/verdict.json
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+      - name: Attach PDF to GitHub Release
+        if: always() && hashFiles('artifacts/audit-release-report.pdf') != '' && inputs.attach-to-tag != ''
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
+        with:
+          tag_name: ${{ inputs.attach-to-tag }}
+          files: artifacts/audit-release-report.pdf
+          fail_on_unmatched_files: true

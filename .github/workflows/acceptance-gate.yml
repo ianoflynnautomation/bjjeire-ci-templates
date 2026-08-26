@@ -158,6 +158,21 @@ on:
         type: boolean
         required: false
         default: false
+      package-audit-reports:
+        description: "Package merged Playwright JSON/JUnit for audit-report.yml."
+        type: boolean
+        required: false
+        default: false
+      package-audit-source:
+        description: "Source label for the report-bundle artifact. Empty uses the Playwright artifact-prefix."
+        type: string
+        required: false
+        default: ""
+      package-audit-category:
+        description: "Audit category for the merged Playwright results (system, acceptance, or api)."
+        type: string
+        required: false
+        default: "system"
     secrets:
       AZURE_TENANT_ID:
         required: false
@@ -319,6 +334,9 @@ jobs:
       fail-on-flaky: ${{ inputs.fail-on-flaky }}
       fail-fast: ${{ inputs.fail-fast }}
       publish-report: ${{ inputs.publish-report }}
+      package-audit-reports: ${{ inputs.package-audit-reports }}
+      package-audit-source: ${{ inputs.package-audit-source }}
+      package-audit-category: ${{ inputs.package-audit-category }}
     secrets:
       test-env-vars: ${{ secrets.test-env-vars }}
 

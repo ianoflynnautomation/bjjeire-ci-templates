@@ -28,6 +28,8 @@ jobs:
       maven-goals: verify
       publish-test-report: true
       test-report-name: Java Test Results
+      package-audit-reports: true
+      package-audit-source: java
 
   # A job that needs the JDK but not the full verify cycle: setup-java-cached
   # installs the toolchain and restores ~/.m2 in one step.
@@ -96,12 +98,26 @@ jobs:
           echo "::endgroup::"
           java -jar target/my-api-*.jar --spring.profiles.active=seeder --validate
 
+  audit-report:
+    name: Audit Report
+    needs: [build-test]
+    if: always()
+    permissions:
+      contents: write
+      actions: read
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/audit-report.yml@v1
+    with:
+      product: My API
+      environment: CI
+      strict-missing: false
+      fail-on-test-failure: true
+
   pr-complete:
     name: PR Checks Complete
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [build-test, openapi-contract, validate-data]
+    needs: [build-test, openapi-contract, validate-data, audit-report]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
