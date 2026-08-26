@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.5.2](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.5.1...v1.5.2) (2026-08-26)
+
+
+### Bug Fixes
+
+* attach audit PDFs with gh and drop secrets inherit ([554b8a7](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/554b8a7e4153725ecb821ff614c6b7cb08a39ca5))
+* bump actions/setup-python from v5.6.0 to v7.0.0 ([53c70f5](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/53c70f5b3dfa653dc1d455a9d2725c6e801ff8f5))
+* bump setup-python to v7 and clear remaining zizmor findings ([9a4131d](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/9a4131dcdb85f862883db218191aa6c44d4897b5))
+
 ## [1.5.1](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.5.0...v1.5.1) (2026-08-26)
 
 
