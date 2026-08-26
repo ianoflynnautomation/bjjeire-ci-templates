@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.1](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.5.0...v1.5.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* failing ci ([06fe91f](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/06fe91f87b4dec3c1cf4f6ee28ca9e21e97006cc))
+* pin actions/setup-python to the real v5.6.0 SHA ([3080b17](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/3080b17a653709ee755ff29790e70de94e720915))
+
 ## [1.5.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.4.4...v1.5.0) (2026-08-26)
 
 
