@@ -26,4 +26,5 @@ jobs:
       release-type: simple
       target-branch: main
       move-major-tag: true
-    secrets: inherit
+    # Do not use secrets: inherit. The called workflow defaults to github.token;
+    # pass release-token explicitly only when a PAT must trigger downstream workflows.

@@ -377,8 +377,11 @@ jobs:
 
       - name: Attach PDF to GitHub Release
         if: always() && hashFiles('artifacts/executive-test-report.pdf') != '' && inputs.attach-to-tag != ''
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
-        with:
-          tag_name: ${{ inputs.attach-to-tag }}
-          files: artifacts/executive-test-report.pdf
-          fail_on_unmatched_files: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.attach-to-tag }}
+          PDF: artifacts/executive-test-report.pdf
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" "$PDF" --clobber
+          echo "::notice title=Audit report::attached ${PDF} to ${TAG}"
