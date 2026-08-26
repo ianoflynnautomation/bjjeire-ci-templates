@@ -1,0 +1,50 @@
+[
+  {
+    "uri": "features/directory.feature",
+    "id": "directory",
+    "keyword": "Feature",
+    "name": "Published gym directory",
+    "elements": [
+      {
+        "id": "directory;visitor-sees-gyms",
+        "keyword": "Scenario",
+        "name": "Visitor opens gyms",
+        "type": "scenario",
+        "steps": [
+          {
+            "keyword": "Given ",
+            "name": "gyms are published",
+            "result": { "status": "passed", "duration": 12000000 }
+          },
+          {
+            "keyword": "When ",
+            "name": "a visitor opens Gyms",
+            "result": { "status": "passed", "duration": 45000000 }
+          },
+          {
+            "keyword": "Then ",
+            "name": "the gym list is displayed",
+            "result": { "status": "passed", "duration": 8000000 }
+          }
+        ]
+      },
+      {
+        "id": "directory;unknown-county",
+        "keyword": "Scenario",
+        "name": "Unknown county is rejected",
+        "type": "scenario",
+        "steps": [
+          {
+            "keyword": "When ",
+            "name": "a client filters by Atlantis",
+            "result": {
+              "status": "failed",
+              "duration": 15000000,
+              "error_message": "expected 400 but was 200"
+            }
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,11 @@
+{
+  "lighthouseVersion": "12.0.0",
+  "requestedUrl": "https://staging.example.invalid/",
+  "finalUrl": "https://staging.example.invalid/",
+  "categories": {
+    "performance": { "id": "performance", "title": "Performance", "score": 0.92 }
+  },
+  "audits": {
+    "server-response-time": { "numericValue": 120.0 }
+  }
+}

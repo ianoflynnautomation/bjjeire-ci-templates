@@ -1,0 +1,11 @@
+{
+  "config": { "configFile": "playwright.api.config.ts" },
+  "suites": [],
+  "stats": {
+    "expected": 24,
+    "unexpected": 0,
+    "flaky": 0,
+    "skipped": 0,
+    "duration": 18450
+  }
+}

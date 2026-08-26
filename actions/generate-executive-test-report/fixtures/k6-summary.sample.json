@@ -1,0 +1,35 @@
+{
+  "root_group": {
+    "name": "catalog-smoke",
+    "path": "",
+    "id": "d41d8cd98f00b204e9800998ecf8427e",
+    "groups": {},
+    "checks": {
+      "passes": 48,
+      "fails": 0
+    }
+  },
+  "metrics": {
+    "http_req_duration": {
+      "avg": 86.4,
+      "min": 22.1,
+      "med": 71.0,
+      "max": 310.2,
+      "p(90)": 140.0,
+      "p(95)": 188.5,
+      "p(99)": 274.0
+    },
+    "http_reqs": {
+      "count": 120,
+      "rate": 24.0
+    },
+    "http_req_failed": {
+      "passes": 120,
+      "fails": 0,
+      "value": 0.0
+    },
+    "iteration_duration": {
+      "max": 5200.0
+    }
+  }
+}
