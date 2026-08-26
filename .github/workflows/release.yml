@@ -1,9 +1,16 @@
-
 name: Release
+
+# release-please on push to main. A feat/fix commit does NOT tag: it opens or
+# updates `chore(main): release x.y.z`. Merging that PR is what creates the
+# GitHub Release, the version tag, and (via move-major-tag) floating v1.
+#
+# workflow_dispatch is here so a missed push event can still be run from
+# Actions → Release → Run workflow.
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,4 +24,6 @@ jobs:
     uses: ./.github/workflows/release-please.yml
     with:
       release-type: simple
+      target-branch: main
       move-major-tag: true
+    secrets: inherit
