@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.4.4...v1.5.0) (2026-08-26)
+
+
+### Features
+
+* add test reporting ([6ebe5bb](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/6ebe5bb403dd446e813968e4043fbb64a4f435a0))
+
 ## [1.4.4](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.4.3...v1.4.4) (2026-08-23)
 
 
