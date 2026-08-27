@@ -35,6 +35,10 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`lint-workflows.yml`](.github/workflows/lint-workflows.yml) | actionlint + zizmor + deprecated-command gate for a repo's workflow files, optional yamllint (file or inline config) |
 | [`sync-labels.yml`](.github/workflows/sync-labels.yml) | Upsert repository labels from a version-controlled YAML file (never deletes; `dry-run` supported) |
 | [`cleanup-artifacts.yml`](.github/workflows/cleanup-artifacts.yml) | Scheduled cleanup of artifacts and stale non-default-branch workflow runs (caches opt-in) |
+| [`executive-test-report.yml`](.github/workflows/executive-test-report.yml) | Combined PDF of unit/integration/API/UI/performance collectors |
+| [`package-test-report.yml`](.github/workflows/package-test-report.yml) | Generic collect step: download any team's test artifact and emit `report-bundle-*` for the audit PDF |
+| [`audit-report.yml`](.github/workflows/audit-report.yml) | Merge-only audit PDF: download `report-*` artifacts, SHA-256 catalog, optional GitHub Release attach |
+| [`audit-release.yml`](.github/workflows/audit-release.yml) | Dedicated compliance pack that re-runs unit/integration and stages acceptance/system; prefer `audit-report.yml` on PR/main |
 
 | Composite action | Purpose |
 |---|---|
@@ -60,6 +64,7 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`actions/helm-render`](actions/helm-render/action.yml) | `helm template` a glob-matched set of charts into one output dir, resolving dependencies first; non-charts annotate instead of failing |
 | [`actions/helm-push-oci`](actions/helm-push-oci/action.yml) | Package and push a chart to any OCI registry, name/version from Chart.yaml, with an expected-version assertion and pull-back verification |
 | [`actions/parse-release-tag`](actions/parse-release-tag/action.yml) | Resolve a component tag (`api-v1.2.3`) to its directory and bare version via a caller-supplied prefix map. The map stays in the caller |
+| [`actions/generate-executive-test-report`](actions/generate-executive-test-report/action.yml) | `package` live results after a test job, `layout` downloaded `report-*` artifacts, run k6, or emit the audit PDF |
 
 Full input/output documentation lives in each workflow's `workflow_call` block — every input has a description, type, and default. Ready-to-copy caller workflows are in [`examples/`](examples/).
 
@@ -68,6 +73,8 @@ Full input/output documentation lives in each workflow's `workflow_call` block �
 > **Moving a Helm chart repo onto these?** The chart list becomes a glob, rendering happens once and is shared by artifact, and the tag-to-chart map is the only repo-specific line left in the publish caller. See [`docs/migrating-helm-chart-workflows.md`](docs/migrating-helm-chart-workflows.md).
 
 > **Migrating from the Playwright workflows in `bjjeire-tests`?** The inputs were renamed to `kebab-case`, the fourteen named secrets collapsed into one `test-env-vars` payload, and `runner_label` became `runs-on` with a different default. See [`docs/migrating-playwright-workflows.md`](docs/migrating-playwright-workflows.md).
+
+> **Audit PDF on PR/main?** Package each test job's artifacts with `generate-executive-test-report` `mode=package`, then call `audit-report.yml`. Do not re-run the suite. See [`docs/audit-report.md`](docs/audit-report.md).
 
 ## Usage
 
