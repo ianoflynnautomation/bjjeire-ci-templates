@@ -29,6 +29,7 @@ jobs:
   frontend:
     permissions:
       contents: read
+      actions: read
     uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/node-build-test.yml@v1
     with:
       working-directory: src/my-app

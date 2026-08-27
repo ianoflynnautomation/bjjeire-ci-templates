@@ -10,6 +10,8 @@ name: Node Build & Test (Reusable)
 #
 # Required caller permissions:
 #   contents: read
+#   actions: read          # nested package-audit job; GitHub requires the
+#                          # superset of every nested job, including skipped ones
 #
 # The container image is the single source of truth for the Node version; there
 # is no setup-node step. Set container-image to an empty string to run directly
