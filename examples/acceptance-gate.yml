@@ -1,9 +1,14 @@
 # Example caller: run the acceptance gate against an ephemeral AKS namespace
-# (create → test → destroy) or against an environment that already exists.
+# (Flux-owned create → test → destroy) or against an environment that already
+# exists.
+#
+# GitOps must already select Static InputProviders labelled
+# bjjeire.io/sha-env=true (ResourceSet bjj-eire-previews). CI only applies that
+# CR; Flux creates namespace, ResourceQuota, and HelmRelease.
 #
 # Copy into the app repo as a job in ci-main.yml (ephemeral) or a dedicated
 # nightly workflow (existing). Pin the reusable workflow to a SHA after the
-# templates PR merges.
+# templates PR merges. Merge the gitops change before pinning this workflow.
 name: Acceptance
 
 on:
