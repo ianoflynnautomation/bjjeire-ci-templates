@@ -67,14 +67,20 @@ on:
         type: string
         default: ""
       shard-total:
-        description: "Default number of parallel shards per project."
+        description: >-
+          Default number of shards per Playwright project. Recommended 4
+          (chromium-desktop) on a D8ds_v6 runner pool (~32 GiB). Use
+          project-shard-overrides so small projects stay at 1–2 shards.
+          Shards still exist when max-parallel is 1; they just run in series.
         required: false
         type: number
-        default: 6
+        default: 4
       project-shard-overrides:
         description: >-
-          Newline-separated `project=count` overrides, so a suite with four
-          tests does not get six shards. Projects not listed use shard-total.
+          Newline-separated `project=count` overrides. Projects not listed use
+          shard-total. Recommended on D8ds_v6: api=2, chromium-desktop=4,
+          firefox-desktop=1, webkit-desktop=1 (8 jobs; fits one 32 GiB node
+          with 2 GiB job requests).
         required: false
         type: string
         default: ""
@@ -198,6 +204,15 @@ on:
         required: false
         type: boolean
         default: false
+      max-parallel:
+        description: >-
+          Cap concurrent shard jobs. Recommended 8 on a D8ds_v6 pool (32 GiB,
+          ~3 GiB per Playwright container). Use 1 only on a single D2-class
+          node. Does not change shard-total — extra shards queue instead of
+          packing until MemoryPressure.
+        required: false
+        type: number
+        default: 8
       publish-report:
         description: "Publish the merged HTML report to GitHub Pages. Requires pages: write + id-token: write at the caller."
         required: false
@@ -326,6 +341,7 @@ jobs:
       options: --ipc=host
     strategy:
       fail-fast: ${{ inputs.fail-fast }}
+      max-parallel: ${{ inputs.max-parallel }}
       matrix:
         entry: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:

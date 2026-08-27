@@ -75,6 +75,7 @@ jobs:
       api-url: ${{ vars.STAGING_API_URL }}
       test-tags: "@acceptance"
       fail-on-flaky: true
+      max-parallel: 8
       publish-report: true
       runs-on: gha-runner-scale-set
     secrets:

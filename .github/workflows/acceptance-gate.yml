@@ -87,7 +87,9 @@ on:
         required: false
         default: "@acceptance"
       shard-total:
-        description: "Default number of parallel shards per Playwright project."
+        description: >-
+          Default number of shards per Playwright project. Recommended 4 on a
+          D8ds_v6 runner pool. Use project-shard-overrides for smaller projects.
         type: number
         required: false
         default: 4
@@ -153,6 +155,13 @@ on:
         type: boolean
         required: false
         default: false
+      max-parallel:
+        description: >-
+          Cap concurrent shard jobs. Recommended 8 on D8ds_v6 (32 GiB). Use 1
+          only on a single D2-class node.
+        type: number
+        required: false
+        default: 8
       publish-report:
         description: "Publish the merged HTML report to GitHub Pages."
         type: boolean
@@ -333,6 +342,7 @@ jobs:
       report-runs-on: ${{ inputs.report-runs-on }}
       fail-on-flaky: ${{ inputs.fail-on-flaky }}
       fail-fast: ${{ inputs.fail-fast }}
+      max-parallel: ${{ inputs.max-parallel }}
       publish-report: ${{ inputs.publish-report }}
       package-audit-reports: ${{ inputs.package-audit-reports }}
       package-audit-source: ${{ inputs.package-audit-source }}

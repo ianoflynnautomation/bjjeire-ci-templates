@@ -55,10 +55,15 @@ jobs:
         firefox-desktop
         webkit-desktop
         a11y
-      # Spend shards where the suite is actually slow.
-      shard-total: 6
+      # Recommended on D8ds_v6 (~32 GiB): 4 chromium shards, fewer for
+      # smaller projects. max-parallel 8 lets them run together; use 1
+      # only on a single D2-class node.
+      shard-total: 4
       project-shard-overrides: |
-        api=3
+        api=2
+        chromium-desktop=4
+        firefox-desktop=1
+        webkit-desktop=1
         a11y=1
       # This repo splits API and UI tests across two Playwright configs.
       config-map: |
@@ -80,6 +85,7 @@ jobs:
 
       playwright-image: mcr.microsoft.com/playwright:v1.61.0-noble
       fail-on-flaky: true
+      max-parallel: 8
       publish-report: true
     secrets:
       # One secret carries every credential as KEY=VALUE lines; each value is
