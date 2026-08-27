@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.5.3...v1.6.0) (2026-08-27)
+
+
+### Features
+
+* **acceptance-gate:** let Flux own SHA ephemeral environments ([662ffb0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/662ffb07ae19c13f30f269c2c4ca2409ef28e8ff))
+* **acceptance-gate:** let Flux own SHA ephemeral environments ([8d182b4](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/8d182b4d378c28104429f99a9afce0d3764110ed))
+
 ## [1.5.3](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.5.2...v1.5.3) (2026-08-27)
 
 
