@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.3](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.5.2...v1.5.3) (2026-08-27)
+
+
+### Bug Fixes
+
+* test report cache issue ([8d5e794](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/8d5e7949c6ba95c88c83974809323b6564d45154))
+
 ## [1.5.2](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.5.1...v1.5.2) (2026-08-26)
 
 
