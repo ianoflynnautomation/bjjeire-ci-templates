@@ -1,7 +1,8 @@
 name: Acceptance Gate (Reusable)
 
 # Orchestrates deploy → test → teardown for an environment that may be
-# ephemeral (create/destroy via Flux sha-env) or already exist (tests only).
+# ephemeral (Flux ResourceSet from a Static InputProvider) or already exist
+# (tests only). GitHub Actions must not kubectl-apply ResourceQuota.
 #
 # Required caller permissions (superset of every job below — GitHub rejects
 # the run at parse time if the caller grants less):
@@ -52,25 +53,35 @@ on:
         required: false
         default: ""
       gitops-repo:
-        description: "Owner/repo holding the sha-env manifests."
+        description: "Unused. Ephemeral envs are Flux-owned; kept so existing callers do not break."
         type: string
         required: false
         default: "ianoflynnautomation/bjjeire-gitops"
       gitops-ref:
-        description: "Git ref of the gitops repo."
+        description: "Unused. Ephemeral envs are Flux-owned; kept so existing callers do not break."
         type: string
         required: false
         default: "main"
       sha-env-path:
-        description: "Repo-relative path to the envsubst SHA-env manifest."
+        description: "Unused. CI no longer kubectl-applies sha-env manifests."
         type: string
         required: false
         default: "kubernetes/apps/base/bjj-eire-preview/sha-env/manifests.yaml"
       values-path:
-        description: "Repo-relative path to the ephemeral Helm values file (becomes a ConfigMap)."
+        description: "Unused. Flux copies bjj-eire-ephemeral-values from flux-system."
         type: string
         required: false
         default: "kubernetes/apps/base/bjj-eire-preview/controller/values-ephemeral.yaml"
+      resourceset-name:
+        description: "Flux ResourceSet that renders PR and SHA ephemeral envs."
+        type: string
+        required: false
+        default: "bjj-eire-previews"
+      resourceset-namespace:
+        description: "Namespace of the ResourceSet and SHA InputProviders."
+        type: string
+        required: false
+        default: "flux-system"
       base-url:
         description: "Frontend URL when mode=existing. Ignored for ephemeral (taken from env_up)."
         type: string
@@ -228,13 +239,6 @@ jobs:
       internal_base_url: ${{ steps.wait.outputs.internal-base-url }}
       namespace: ${{ steps.wait.outputs.namespace }}
     steps:
-      - name: Checkout gitops
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.gitops-repo }}
-          ref: ${{ inputs.gitops-ref }}
-          persist-credentials: false
-
       - name: Log in to AKS
         uses: ianoflynnautomation/bjjeire-ci-templates/actions/azure-aks-login@d0f389bf22e50d9458f4cbcb1938d716b59b0f74  # v1.4.3
         with:
@@ -245,46 +249,54 @@ jobs:
           cluster-name: ${{ inputs.cluster-name }}
           install-helm: "false"
 
-      - name: Apply SHA-env manifests
+      - name: Request SHA env from Flux
         env:
           ENV_ID: ${{ inputs.env-id }}
           IMAGE_TAG: ${{ inputs.image-tag }}
           CLUSTER_DOMAIN: ${{ inputs.cluster-domain }}
           ROOT_DOMAIN: ${{ inputs.root-domain != '' && inputs.root-domain || inputs.cluster-domain }}
           TTL: ${{ inputs.ttl }}
-          MANIFEST: ${{ inputs.sha-env-path }}
-          VALUES: ${{ inputs.values-path }}
-          GITOPS_REPO: ${{ inputs.gitops-repo }}
-          GITOPS_REF: ${{ inputs.gitops-ref }}
+          RESOURCESET: ${{ inputs.resourceset-name }}
+          RESOURCESET_NS: ${{ inputs.resourceset-namespace }}
         run: |
           set -euo pipefail
           : "${ENV_ID:?}" "${IMAGE_TAG:?}" "${CLUSTER_DOMAIN:?}" "${ROOT_DOMAIN:?}" "${TTL:?}"
-          if [ ! -f "${MANIFEST}" ]; then
-            echo "::error title=Missing manifest::${MANIFEST} not in ${GITOPS_REPO}@${GITOPS_REF}"
+          if [[ ! "${ENV_ID}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+            echo "::error title=Invalid env-id::${ENV_ID} is not a DNS-1123 label (max 63 chars)"
             exit 1
           fi
-          if [ ! -f "${VALUES}" ]; then
-            echo "::error title=Missing values::${VALUES} not in ${GITOPS_REPO}@${GITOPS_REF}"
-            exit 1
-          fi
-          render() {
-            python3 -c '
-          import os, pathlib, sys
-          text = pathlib.Path(sys.argv[1]).read_text()
-          for key in ("ENV_ID", "IMAGE_TAG", "CLUSTER_DOMAIN", "ROOT_DOMAIN", "TTL"):
-              text = text.replace("$" + "{" + key + "}", os.environ[key])
-          sys.stdout.write(text)
-          ' "$1"
-          }
-          echo "::group::rendered sha-env"
-          render "${MANIFEST}"
-          echo "::endgroup::"
-          render "${MANIFEST}" | kubectl apply --server-side --field-manager=gha -f -
-          kubectl wait "namespace/${ENV_ID}" --for=jsonpath='{.status.phase}'=Active --timeout=30s
-          kubectl -n "${ENV_ID}" create configmap bjj-eire-ephemeral-values \
-            --from-file=values.yaml="${VALUES}" \
-            --dry-run=client -o yaml \
-            | kubectl apply --server-side --field-manager=gha -f -
+          case "${IMAGE_TAG}${CLUSTER_DOMAIN}${ROOT_DOMAIN}${TTL}${RESOURCESET}${RESOURCESET_NS}" in
+            *$'\n'*|*$'\r'*) echo "::error title=Invalid input::values must be single-line"; exit 1 ;;
+          esac
+          kubectl apply --server-side --field-manager=gha -f - <<YAML
+          apiVersion: fluxcd.controlplane.io/v1
+          kind: ResourceSetInputProvider
+          metadata:
+            name: ${ENV_ID}
+            namespace: ${RESOURCESET_NS}
+            labels:
+              bjjeire.io/sha-env: "true"
+              bjjeire.io/ephemeral: "true"
+            annotations:
+              janitor/ttl: "${TTL}"
+              fluxcd.controlplane.io/reconcileEvery: "1m"
+          spec:
+            type: Static
+            defaultValues:
+              ns: "${ENV_ID}"
+              imageTag: "${IMAGE_TAG}"
+              ttl: "${TTL}"
+              clusterDomain: "${CLUSTER_DOMAIN}"
+              rootDomain: "${ROOT_DOMAIN}"
+          YAML
+          kubectl wait --for=condition=Ready \
+            -n "${RESOURCESET_NS}" \
+            --timeout=2m \
+            "resourcesetinputprovider/${ENV_ID}"
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          kubectl -n "${RESOURCESET_NS}" annotate resourceset "${RESOURCESET}" \
+            "reconcile.fluxcd.io/requestedAt=${now}" --overwrite
+          kubectl wait "namespace/${ENV_ID}" --for=jsonpath='{.status.phase}'=Active --timeout=3m
 
       - name: Wait for HelmRelease
         id: wait
@@ -361,13 +373,16 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/flux-ephemeral-teardown.yml@d0f389bf22e50d9458f4cbcb1938d716b59b0f74  # v1.4.3
+    uses: ./.github/workflows/flux-ephemeral-teardown.yml
     with:
       env-id: ${{ inputs.env-id }}
       cluster-resource-group: ${{ inputs.cluster-resource-group }}
       cluster-name: ${{ inputs.cluster-name }}
       helm-release: bjj-eire
       flux-helmrelease: bjj-eire
+      input-provider: ${{ inputs.env-id }}
+      input-provider-namespace: ${{ inputs.resourceset-namespace }}
+      resourceset-name: ${{ inputs.resourceset-name }}
       runs-on: ${{ inputs.runs-on }}
     secrets:
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}

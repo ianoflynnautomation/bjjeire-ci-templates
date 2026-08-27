@@ -43,6 +43,21 @@ on:
         type: string
         required: false
         default: ""
+      input-provider:
+        description: "Static ResourceSetInputProvider name in flux-system. Empty skips it. Must be deleted so Flux does not recreate the namespace."
+        type: string
+        required: false
+        default: ""
+      input-provider-namespace:
+        description: "Namespace of the SHA ResourceSetInputProvider."
+        type: string
+        required: false
+        default: "flux-system"
+      resourceset-name:
+        description: "ResourceSet to annotate after dropping the SHA input."
+        type: string
+        required: false
+        default: "bjj-eire-previews"
       wait-timeout:
         description: "How long to wait for the namespace to terminate. 0 skips the wait."
         type: string
@@ -99,9 +114,25 @@ jobs:
           HELM_RELEASE: ${{ inputs.helm-release }}
           FLUX_HR: ${{ inputs.flux-helmrelease }}
           WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
+          INPUT_PROVIDER: ${{ inputs.input-provider }}
+          INPUT_PROVIDER_NS: ${{ inputs.input-provider-namespace }}
+          RESOURCESET: ${{ inputs.resourceset-name }}
         run: |
           set -euo pipefail
           echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${INPUT_PROVIDER}" ]; then
+            kubectl -n "${INPUT_PROVIDER_NS}" delete resourcesetinputprovider "${INPUT_PROVIDER}" \
+              --ignore-not-found --wait=true --timeout=60s
+            now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            kubectl -n "${INPUT_PROVIDER_NS}" annotate resourceset "${RESOURCESET}" \
+              "reconcile.fluxcd.io/requestedAt=${now}" --overwrite || true
+            if kubectl wait --for=delete "namespace/${NAMESPACE}" --timeout=90s; then
+              echo "::notice title=Env destroyed::${NAMESPACE} pruned by Flux after InputProvider delete"
+              exit 0
+            fi
+            echo "::notice title=Flux prune pending::${NAMESPACE} still present — falling through to label-guarded delete"
+          fi
 
           if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
             echo "::notice title=Nothing to destroy::namespace ${NAMESPACE} is not present"
