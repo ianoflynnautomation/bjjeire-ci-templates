@@ -226,6 +226,7 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
         env:
           REPORTERS: ${{ inputs.reporters }}
+          RESULTS_JSON: ${{ inputs.results-json-path }}
         run: |
           set -o pipefail
           shopt -s nullglob
@@ -275,7 +276,21 @@ jobs:
             exit 0
           fi
           echo "::group::playwright merge-reports (${valid} blob(s))"
-          npx playwright merge-reports --reporter "${REPORTERS}" ./all-blob-reports
+          # Playwright's json reporter writes to STDOUT and has no output-file
+          # env var (1.61 ships only PLAYWRIGHT_HTML_OUTPUT_DIR), so a single
+          # `--reporter html,json` never creates results-json-path: the upload
+          # warns "No files were found", no *-json-results artifact exists, and
+          # downstream audit packaging fails on the missing artifact. Run the
+          # file-writing reporters first, then a second redirected pass for json.
+          non_json=$(printf '%s' "${REPORTERS}" | tr ',' '\n' | sed '/^json$/d;/^$/d' | paste -sd, -)
+          if [ -n "${non_json}" ]; then
+            npx playwright merge-reports --reporter "${non_json}" ./all-blob-reports
+          fi
+          if printf '%s' "${REPORTERS}" | tr ',' '\n' | grep -qx json; then
+            mkdir -p "$(dirname "${RESULTS_JSON}")"
+            npx playwright merge-reports --reporter json ./all-blob-reports > "${RESULTS_JSON}"
+            echo "  wrote ${RESULTS_JSON} ($(wc -c <"${RESULTS_JSON}") bytes)"
+          fi
           echo "::endgroup::"
           echo "skipped=false" >> "$GITHUB_OUTPUT"
 
@@ -289,13 +304,23 @@ jobs:
           RESULTS_JSON: ${{ inputs.results-json-path }}
         run: |
           set -o pipefail
+          # node, not jq: the merge job runs in node-image (node:22-bookworm-slim
+          # by default), which has no jq. `jq ... || echo 0` swallowed that and
+          # reported 0 for every count on green runs — which also meant
+          # fail-on-flaky could never fire, since flaky_count was always 0.
           read_stat() {
-            jq "${1} // 0" "$RESULTS_JSON" 2>/dev/null || echo 0
+            node -e '
+              const fs=require("fs");
+              try {
+                const s=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).stats||{};
+                process.stdout.write(String(s[process.argv[2]] ?? 0));
+              } catch { process.stdout.write("0"); }
+            ' "$RESULTS_JSON" "$1" 2>/dev/null || echo 0
           }
-          passed=$(read_stat '.stats.expected')
-          failed=$(read_stat '.stats.unexpected')
-          flaky=$(read_stat '.stats.flaky')
-          skipped=$(read_stat '.stats.skipped')
+          passed=$(read_stat expected)
+          failed=$(read_stat unexpected)
+          flaky=$(read_stat flaky)
+          skipped=$(read_stat skipped)
           {
             echo "passed_count=${passed:-0}"
             echo "failed_count=${failed:-0}"
