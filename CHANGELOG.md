@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.2](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.6.1...v1.6.2) (2026-08-29)
+
+
+### Bug Fixes
+
+* playwright reporting json output ([17ca602](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/17ca6026ef1a9327050c2a83e7a060dba162c668))
+
 ## [1.6.1](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.6.0...v1.6.1) (2026-08-29)
 
 
