@@ -239,9 +239,30 @@ jobs:
           # on one ("End of central directory record signature not found"), which
           # would lose the results of every healthy shard. Drop invalid blobs
           # first so the rest still merge.
+          #
+          # Do NOT reach for `unzip` unconditionally: the default node-image
+          # (node:22-bookworm-slim) has no unzip, so `unzip -tqq` exits 127 and
+          # the check silently rejects EVERY blob — the merge is skipped, no
+          # *-json-results artifact is uploaded, and downstream audit-report
+          # packaging fails on a missing artifact even though all shards passed.
+          # node is always present here (the job runs npx below), so fall back
+          # to scanning for the End of Central Directory signature, which is
+          # exactly the truncation that breaks merge-reports.
+          zip_ok() {
+            [ -s "$1" ] || return 1
+            if command -v unzip >/dev/null 2>&1; then
+              unzip -tqq "$1" >/dev/null 2>&1
+            else
+              node -e 'const b=require("fs").readFileSync(process.argv[1]);
+                if(b.length<22)process.exit(1);
+                for(let i=b.length-22,s=Math.max(0,b.length-65558);i>=s;i--)
+                  if(b.readUInt32LE(i)===0x06054b50)process.exit(0);
+                process.exit(1);' "$1" >/dev/null 2>&1
+            fi
+          }
           valid=0
           for blob in all-blob-reports/*.zip; do
-            if [ -s "$blob" ] && unzip -tqq "$blob" >/dev/null 2>&1; then
+            if zip_ok "$blob"; then
               valid=$((valid + 1))
             else
               echo "::warning title=Corrupt blob discarded::${blob} is empty or truncated; excluding it from the merge"
