@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.1](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.6.0...v1.6.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* .playwright reporter defect ([b1bca1a](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/b1bca1a155baf258ef877881cbf5c3f07714c1cd))
+* .playwright reporter defect ([70fa81c](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/70fa81c598938bd6d16739d63f0ea74c06010009))
+
 ## [1.6.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.5.3...v1.6.0) (2026-08-27)
 
 
