@@ -17,6 +17,13 @@ inputs:
     description: 'kubectl wait timeout (Go duration, e.g. 10m).'
     required: false
     default: '10m'
+  create-timeout-seconds:
+    description: >-
+      How long to poll for the HelmRelease to be created before waiting on its
+      Ready condition. Flux creates it asynchronously, and `kubectl wait` exits
+      immediately with NotFound when the object does not exist yet.
+    required: false
+    default: '300'
   cluster-domain:
     description: 'DNS suffix used to compose public URLs (e.g. dev.bjjeire.com). Empty skips URL outputs.'
     required: false
@@ -76,6 +83,7 @@ runs:
         NS: ${{ inputs.namespace }}
         NAME: ${{ inputs.name }}
         TIMEOUT: ${{ inputs.timeout }}
+        CREATE_TIMEOUT_SECONDS: ${{ inputs.create-timeout-seconds }}
         CLUSTER_DOMAIN: ${{ inputs.cluster-domain }}
         ENV_ID: ${{ inputs.env-id }}
         API_SERVICE: ${{ inputs.api-service }}
@@ -93,6 +101,26 @@ runs:
           exit 1
         fi
         env_id="${ENV_ID:-$NS}"
+        # `kubectl wait` exits immediately with NotFound when the object does
+        # not exist yet — the --timeout never applies. Flux creates the
+        # HelmRelease asynchronously (ResourceSet reconcile, then Helm install),
+        # so poll for creation first or this reports a bogus
+        # "did not become Ready within ${TIMEOUT}" after a second or two.
+        echo "::group::Waiting for helmrelease/${NAME} to be created in ${NS} (${CREATE_TIMEOUT_SECONDS}s)"
+        create_deadline=$(( $(date +%s) + CREATE_TIMEOUT_SECONDS ))
+        until kubectl -n "${NS}" get helmrelease "${NAME}" >/dev/null 2>&1; do
+          if [ "$(date +%s)" -ge "${create_deadline}" ]; then
+            echo "::endgroup::"
+            echo "::error title=HelmRelease not created::${NS}/${NAME} did not appear within ${CREATE_TIMEOUT_SECONDS}s — check the ResourceSet and its InputProvider in flux-system"
+            kubectl -n "${NS}" get all 2>&1 | head -20 || true
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          sleep 5
+        done
+        echo "  present"
+        echo "::endgroup::"
+
         echo "::group::Waiting for helmrelease/${NAME} in ${NS} (timeout ${TIMEOUT})"
         if ! kubectl -n "${NS}" wait helmrelease/"${NAME}" \
           --for=condition=Ready \
