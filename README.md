@@ -27,6 +27,7 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`kubernetes-manifest-validation.yml`](.github/workflows/kubernetes-manifest-validation.yml) | Render Kustomize overlays (globs, no cluster list), helm lint, kubeconform schema gate, content deny-pattern, rendered-manifests artifact |
 | [`kubernetes-policy-scan.yml`](.github/workflows/kubernetes-policy-scan.yml) | Trivy misconfig (+ SARIF to code scanning), Polaris audit, opt-in kube-score and hadolint over already-rendered manifests |
 | [`helm-chart-quality.yml`](.github/workflows/helm-chart-quality.yml) | Helm sibling of the Kustomize workflow: discover charts by glob, lint, `helm template` the release charts, kubeconform gate, rendered-manifests artifact |
+| [`npm-tarball-publish-oci.yml`](.github/workflows/npm-tarball-publish-oci.yml) | Pack a Node workspace and publish every tarball to an OCI registry as one artifact under one digest, with a clean-install check, provenance and optional release assets |
 | [`helm-publish-oci.yml`](.github/workflows/helm-publish-oci.yml) | Package + push a chart to any OCI registry, name/version read from Chart.yaml, tag-version assertion and pull-back verification |
 | [`flux-local.yml`](.github/workflows/flux-local.yml) | Offline Flux verification: `flux-local test` per cluster, plus a PR-vs-base `diff` posted as a sticky comment |
 | [`release-please.yml`](.github/workflows/release-please.yml) | release-please in single-package or manifest mode, normalised outputs (`paths-released`/`tags-released`), floating-major-tag move |

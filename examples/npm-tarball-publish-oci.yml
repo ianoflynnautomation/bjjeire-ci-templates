@@ -1,0 +1,67 @@
+name: Publish npm Tarballs
+
+# Publish a Node workspace's tarballs to GHCR as one OCI artifact.
+#
+# For workspaces that cannot use the npm registry: GitHub Packages only accepts
+# packages scoped to the repository owner, so a workspace with unscoped packages
+# — or a scope that is not the owner — would have to rename every package, and
+# every import in every consumer, to satisfy a registry rule. GHCR takes the
+# tarballs exactly as `npm pack` produced them.
+#
+# All of them ship under ONE digest because workspace packages resolve each
+# other by `file:` specifier: install one alone and npm 404s looking for its
+# siblings on registry.npmjs.org. One artifact means one consistent set.
+#
+# Consumers pull with two commands:
+#
+#   oras pull ghcr.io/owner/my-packages:v1.2.3 -o vendor
+#   tar -xzf vendor/*.tar.gz -C vendor && npm i vendor/*.tgz
+#
+# `latest` moves only on a tag: somebody pinned to it should get the last thing
+# that was released, not the last thing that merged.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Not cancel-in-progress: a half-published bundle is worse than a slow queue.
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish tarball bundle
+    permissions:
+      contents: write # attaching release assets on a tag
+      packages: write
+      id-token: write # provenance attestation
+      attestations: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/npm-tarball-publish-oci.yml@v1
+    with:
+      image: ghcr.io/${{ github.repository_owner }}/my-packages
+      tags: ${{ startsWith(github.ref, 'refs/tags/')
+                && format('{0} {1} latest', github.ref_name, github.sha)
+                || format('main {0}', github.sha) }}
+      node-version: "22"
+      build-command: npm run build
+      pack-command: npm run pack
+      tarball-dir: dist-pack
+      bundle-name: my-packages-{version}.tar.gz
+      # Set this. A pack script that silently drops a package produces a bundle
+      # that installs and then cannot resolve an import — in the consumer's
+      # pipeline, days later, not here.
+      expected-tarballs: 11
+      # The check that earns the job: a tarball shipping no build output
+      # installs cleanly and fails at import time. Exercise a real entry point.
+      verify-install: true
+      verify-command: |
+        node -e "require('my-package')"
+      attest-provenance: true
+      # The no-registry path, for a consumer that cannot authenticate to GHCR.
+      attach-to-release: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}

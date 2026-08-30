@@ -65,7 +65,6 @@ runs:
     - name: Setup kubectl
       uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d  # v5.1.0
       with:
-        # Passing version: '' counts as "supplied" and skips the action default.
         version: ${{ inputs.kubectl-version != '' && inputs.kubectl-version || 'latest' }}
 
     - name: Setup helm
