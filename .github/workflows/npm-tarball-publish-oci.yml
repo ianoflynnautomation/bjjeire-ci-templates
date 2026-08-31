@@ -185,12 +185,20 @@ jobs:
 
       - name: Install dependencies
         shell: bash
-        run: ${{ inputs.install-command }}
+        env:
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+        run: |
+          set -euo pipefail
+          bash -c "$INSTALL_COMMAND"
 
       - name: Build
         if: inputs.build-command != ''
         shell: bash
-        run: ${{ inputs.build-command }}
+        env:
+          BUILD_COMMAND: ${{ inputs.build-command }}
+        run: |
+          set -euo pipefail
+          bash -c "$BUILD_COMMAND"
 
       - name: Pack
         id: pack
@@ -281,7 +289,7 @@ jobs:
             org.opencontainers.image.version=${{ steps.pack.outputs.version }}
           summary-title: Published npm tarball bundle
 
-      - name: Attest build provenance
+      - name: Build provenance
         if: inputs.attest-provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
