@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.6.2...v1.7.0) (2026-08-30)
+
+
+### Features
+
+* add npm tarball publish oci ([e7b88f9](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/e7b88f90f25c184231e585d2658c50b554d78329))
+
 ## [1.6.2](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.6.1...v1.6.2) (2026-08-29)
 
 
