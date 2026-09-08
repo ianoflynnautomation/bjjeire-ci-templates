@@ -372,7 +372,7 @@ jobs:
 
       - name: Setup kubeconform
         if: inputs.validate
-        uses: fluxcd/pkg/actions/kubeconform@dfc427c54394de76e0053c2eba45699fad01c3b4  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
+        uses: fluxcd/pkg/actions/kubeconform@6d8d5d9e03f8da11e9685652e205f20aeb99c4ba  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
         with:
           version: ${{ inputs.kubeconform-version }}
 
