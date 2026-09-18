@@ -3,6 +3,10 @@ name: Lint Workflows (Reusable)
 # Shared actionlint + zizmor + deprecated-command gate for GitHub Actions
 # workflows, plus an optional yamllint pass.
 #
+# actionlint skips generated GitHub Agentic Workflow lock files (*.lock.yml)
+# by default: gh-aw emits concurrency.queue, which actionlint 1.7 treats as a
+# syntax error. zizmor still scans those files after they are restored.
+#
 # Required caller permissions:
 #   contents: read
 #   checks: write
@@ -35,6 +39,15 @@ on:
         required: false
         type: string
         default: "error"
+      actionlint-exclude:
+        description: >-
+          Space-separated globs under .github/workflows that actionlint skips.
+          Defaults to generated GitHub Agentic Workflow lock files (*.lock.yml),
+          which actionlint 1.7 rejects for compiler-only keys such as
+          concurrency.queue. Pass an empty string to lint every workflow file.
+        required: false
+        type: string
+        default: "*.lock.yml"
       yamllint:
         description: "Run yamllint as a sibling job. Requires a config file at yamllint-config in the caller repo."
         required: false
@@ -91,11 +104,55 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Park generated workflow files actionlint cannot parse
+        id: park_lock
+        shell: bash
+        env:
+          EXCLUDE: ${{ inputs.actionlint-exclude }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          park="${RUNNER_TEMP}/actionlint-parked-workflows"
+          mkdir -p "$park"
+          parked=0
+          if [ -n "$EXCLUDE" ]; then
+            # Intentional word-split and glob: EXCLUDE is a space-separated glob list.
+            # shellcheck disable=SC2086
+            for pattern in $EXCLUDE; do
+              case "$pattern" in
+                *..*|/*|~*)
+                  echo "::error title=actionlint-exclude::Refusing pattern '${pattern}'; globs must stay under .github/workflows"
+                  exit 1
+                  ;;
+              esac
+              # shellcheck disable=SC2086
+              for f in .github/workflows/$pattern; do
+                [ -f "$f" ] || continue
+                mv "$f" "$park/"
+                parked=$((parked + 1))
+                echo "parked ${f}"
+              done
+            done
+          fi
+          echo "parked=${parked}" >> "$GITHUB_OUTPUT"
+          echo "::notice title=actionlint::Skipped ${parked} generated workflow file(s) matching '${EXCLUDE:-<none>}'"
       - name: Run actionlint
         uses: reviewdog/action-actionlint@dbe5299849118fd6f099ba563d263d770955a64a  # v1.73.2
         with:
           fail_level: ${{ inputs.actionlint-fail-level }}
           reporter: github-check
+      - name: Restore parked workflow files
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          park="${RUNNER_TEMP}/actionlint-parked-workflows"
+          files=("$park"/*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            exit 0
+          fi
+          mv "${files[@]}" .github/workflows/
       - name: Zizmor (Actions security scan)
         continue-on-error: ${{ !inputs.zizmor-enforce }}
         shell: bash
@@ -127,13 +184,14 @@ jobs:
         env:
           ZIZMOR_ENFORCE: ${{ inputs.zizmor-enforce }}
           ZIZMOR_PATHS: ${{ inputs.zizmor-paths }}
+          ACTIONLINT_EXCLUDE: ${{ inputs.actionlint-exclude }}
         run: |
           {
             echo "### Workflow lint"
             echo ""
             echo "| Check | Scope |"
             echo "| --- | --- |"
-            echo "| actionlint | \`.github/workflows\` (reviewdog) |"
+            echo "| actionlint | \`.github/workflows\` except \`${ACTIONLINT_EXCLUDE:-<none>}\` (reviewdog) |"
             echo "| zizmor | \`${ZIZMOR_PATHS}\` (enforce=${ZIZMOR_ENFORCE}) |"
             echo "| deprecated commands | \`${ZIZMOR_PATHS}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
