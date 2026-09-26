@@ -33,7 +33,7 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`release-please.yml`](.github/workflows/release-please.yml) | release-please in single-package or manifest mode, normalised outputs (`paths-released`/`tags-released`), floating-major-tag move |
 | [`release-dispatch.yml`](.github/workflows/release-dispatch.yml) | Fires a `workflow_dispatch` per released package from `tags-released`. Separate from `release-please.yml` so only monorepo callers pay `actions: write` |
 | [`renovate.yml`](.github/workflows/renovate.yml) | Self-hosted Renovate run with runtime-substituted host rules for private registries |
-| [`lint-workflows.yml`](.github/workflows/lint-workflows.yml) | actionlint + zizmor + deprecated-command gate for a repo's workflow files, optional yamllint (file or inline config) |
+| [`lint-workflows.yml`](.github/workflows/lint-workflows.yml) | actionlint + zizmor + deprecated-command gate for a repo's workflow files, optional yamllint (file or inline config). actionlint skips generated `*.lock.yml` (gh-aw) by default |
 | [`sync-labels.yml`](.github/workflows/sync-labels.yml) | Upsert repository labels from a version-controlled YAML file (never deletes; `dry-run` supported) |
 | [`cleanup-artifacts.yml`](.github/workflows/cleanup-artifacts.yml) | Scheduled cleanup of artifacts and stale non-default-branch workflow runs (caches opt-in) |
 | [`executive-test-report.yml`](.github/workflows/executive-test-report.yml) | Combined PDF of unit/integration/API/UI/performance collectors |
@@ -57,7 +57,7 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 | [`actions/check-required-jobs`](actions/check-required-jobs/action.yml) | Aggregate branch-protection gate over `toJson(needs)` — fails on failure/cancelled, passes on path-filter skips |
 | [`actions/sticky-comment`](actions/sticky-comment/action.yml) | Marker-identified issue/PR comment that updates in place instead of spamming the thread |
 | [`actions/maven-openapi-export`](actions/maven-openapi-export/action.yml) | Run the failsafe IT that writes the OpenAPI document, then validate the JSON |
-| [`actions/openapi-breaking-gate`](actions/openapi-breaking-gate/action.yml) | Pull the last published OpenAPI contract from an OCI registry and fail on breaking changes (oasdiff); skips only on genuine first publish |
+| [`actions/openapi-breaking-gate`](actions/openapi-breaking-gate/action.yml) | Pull the last published OpenAPI contract from an OCI registry and fail on breaking changes (oasdiff). Optional `err-ignore` file accepts listed breaks only. Skips only on genuine first publish |
 | [`actions/oci-push-artifact`](actions/oci-push-artifact/action.yml) | Publish a file to any OCI registry as a typed artifact with ORAS; extra tags alias one digest |
 | [`actions/oci-tag-audit`](actions/oci-tag-audit/action.yml) | Assert caller-supplied `repository:tag` refs exist in any Registry v2 host; fails closed on probe errors. Extracting the pins stays in the caller |
 | [`actions/setup-kubernetes-tools`](actions/setup-kubernetes-tools/action.yml) | Flux CLI, Kustomize, kubeconform and Helm — each installed only when you pass its version |
