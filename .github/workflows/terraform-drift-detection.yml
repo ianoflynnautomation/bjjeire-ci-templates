@@ -1,0 +1,371 @@
+name: Terraform Drift Detection (Reusable)
+
+# Scheduled plan against live state to catch infrastructure that no longer
+# matches the code — console edits, out-of-band scripts, provider-side changes.
+# terraform-plan.yml answers "what will this PR change?"; this answers "has
+# anything changed underneath us since the last apply?".
+#
+# On drift it opens a GitHub issue and keeps it updated in place; when a later
+# run comes back clean it closes that issue with a comment. The issue is found
+# by label, not by title, so retitling it does not orphan the tracker.
+#
+# Deliberately does NOT upload the plan file. terraform-plan.yml does, because
+# terraform-apply.yml has to consume the exact plan; here nothing consumes it,
+# and a binary plan stores sensitive values in cleartext. The issue body uses
+# `terraform show`, which redacts them to "(sensitive value)".
+#
+# Call it on a schedule from the consumer repo:
+#   on:
+#     schedule: [{ cron: "0 6 * * 1-5" }]
+#     workflow_dispatch:
+#
+# Required caller permissions:
+#   contents: read
+#   id-token: write
+#   issues: write            # only when open-issue: true (the default)
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Directory containing the Terraform root module."
+        required: false
+        type: string
+        default: "."
+      terraform-version:
+        description: "Terraform CLI version passed to hashicorp/setup-terraform."
+        required: false
+        type: string
+        default: "1.10.5"
+      backend-config:
+        description: "Multi-line `key=value` pairs, each passed to `terraform init -backend-config=`."
+        required: false
+        type: string
+        default: ""
+      var-file:
+        description: "Optional path (relative to working-directory) passed to `terraform plan -var-file=`."
+        required: false
+        type: string
+        default: ""
+      workspace:
+        description: "Optional Terraform workspace to select. Not created — a drift check must never invent state."
+        required: false
+        type: string
+        default: ""
+      init-args:
+        description: "Extra arguments appended to `terraform init` (after backend-config flags)."
+        required: false
+        type: string
+        default: ""
+      plan-args:
+        description: "Extra arguments appended to `terraform plan`."
+        required: false
+        type: string
+        default: ""
+      refresh-only:
+        description: >-
+          Run `terraform plan -refresh-only`, reporting only differences between
+          state and real infrastructure. The default (false) runs a full plan,
+          which also catches code merged but never applied — usually what you
+          want from a scheduled check.
+        required: false
+        type: boolean
+        default: false
+      environment:
+        description: "Optional GitHub environment, to scope the OIDC credentials this check runs with."
+        required: false
+        type: string
+        default: ""
+      open-issue:
+        description: "Open (and later close) a GitHub issue tracking the drift. Requires issues: write."
+        required: false
+        type: boolean
+        default: true
+      issue-title:
+        description: "Title of the drift issue. Cosmetic — the issue is located by issue-label."
+        required: false
+        type: string
+        default: "Terraform drift detected"
+      issue-label:
+        description: >-
+          Label identifying the drift issue, so repeated runs update one issue
+          instead of filing a new one each morning. Created if missing. Use a
+          distinct label per module when one repo tracks several.
+        required: false
+        type: string
+        default: "terraform-drift"
+      issue-assignees:
+        description: "Comma-separated GitHub usernames assigned when the issue is first opened."
+        required: false
+        type: string
+        default: ""
+      fail-on-drift:
+        description: >-
+          Fail the job when drift is found. Off by default: the issue is the
+          signal, and a permanently red scheduled workflow trains people to
+          ignore it. Turn on if you gate a dashboard on the run result.
+        required: false
+        type: boolean
+        default: false
+      plugin-cache:
+        description: "Cache the Terraform plugin directory between runs."
+        required: false
+        type: boolean
+        default: true
+      runs-on:
+        description: "Runner label for the drift job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout for the drift job."
+        required: false
+        type: number
+        default: 30
+    secrets:
+      ARM_CLIENT_ID:
+        description: "Azure AD app (workload identity) client ID for OIDC auth."
+        required: false
+      ARM_TENANT_ID:
+        description: "Azure tenant ID for OIDC auth."
+        required: false
+      ARM_SUBSCRIPTION_ID:
+        description: "Azure subscription ID."
+        required: false
+    outputs:
+      drift:
+        description: "true when the plan reported changes against live state."
+        value: ${{ jobs.drift.outputs.drift }}
+      issue-number:
+        description: "Number of the drift issue opened or updated. Empty when there was no drift, or open-issue is false."
+        value: ${{ jobs.drift.outputs.issue-number }}
+
+jobs:
+  drift:
+    name: Detect drift
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    outputs:
+      drift: ${{ steps.plan.outputs.drift }}
+      issue-number: ${{ steps.issue.outputs.number }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Prepare plugin cache directory
+        if: inputs.plugin-cache
+        shell: bash
+        run: mkdir -p "$HOME/.terraform.d/plugin-cache"
+
+      - name: Cache Terraform plugins
+        if: inputs.plugin-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: ${{ runner.os }}-tfplugins-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', inputs.working-directory)) }}
+          restore-keys: |
+            ${{ runner.os }}-tfplugins-${{ inputs.terraform-version }}-
+            ${{ runner.os }}-tfplugins-
+
+      - name: Configure plugin cache
+        if: inputs.plugin-cache
+        shell: bash
+        run: echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> "$GITHUB_ENV"
+
+      - name: Terraform init
+        shell: bash
+        env:
+          BACKEND_CONFIG: ${{ inputs.backend-config }}
+          INIT_ARGS: ${{ inputs.init-args }}
+        run: |
+          set -euo pipefail
+          echo "::group::terraform init"
+          BACKEND_ARGS=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && BACKEND_ARGS+=("-backend-config=${line}")
+          done <<< "$BACKEND_CONFIG"
+          EXTRA=()
+          if [ -n "$INIT_ARGS" ]; then
+            read -r -a EXTRA <<< "$INIT_ARGS"
+          fi
+          terraform init "${BACKEND_ARGS[@]}" "${EXTRA[@]}"
+          echo "::endgroup::"
+
+      - name: Select workspace
+        if: inputs.workspace != ''
+        shell: bash
+        env:
+          TF_WORKSPACE_NAME: ${{ inputs.workspace }}
+        # No -or-create: if the workspace is missing, that is a real problem to
+        # surface, not one to paper over by creating empty state.
+        run: terraform workspace select "$TF_WORKSPACE_NAME"
+
+      - name: Terraform plan
+        id: plan
+        shell: bash
+        env:
+          VAR_FILE: ${{ inputs.var-file }}
+          PLAN_ARGS: ${{ inputs.plan-args }}
+          REFRESH_ONLY: ${{ inputs.refresh-only }}
+        run: |
+          set -euo pipefail
+          args=(-detailed-exitcode -lock=false -no-color -out=drift.tfplan)
+          [ "$REFRESH_ONLY" = "true" ] && args+=(-refresh-only)
+          if [ -n "$VAR_FILE" ]; then
+            args+=(-var-file="$VAR_FILE")
+          fi
+          EXTRA_ARGS=()
+          if [ -n "$PLAN_ARGS" ]; then
+            read -r -a EXTRA_ARGS <<< "$PLAN_ARGS"
+          fi
+
+          echo "::group::terraform plan"
+          set +e
+          terraform plan "${args[@]}" "${EXTRA_ARGS[@]}"
+          ec=$?
+          set -e
+          echo "::endgroup::"
+
+          case $ec in
+            0) echo "drift=false" >> "$GITHUB_OUTPUT"
+               echo "::notice title=Drift::No drift — live state matches the configuration" ;;
+            2) echo "drift=true" >> "$GITHUB_OUTPUT"
+               echo "::warning title=Drift::Live state has drifted from the configuration" ;;
+            *) echo "::error title=Drift check failed::terraform plan exited ${ec}"
+               exit "$ec" ;;
+          esac
+
+      - name: Render drift report
+        id: report
+        if: steps.plan.outputs.drift == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `terraform show` redacts sensitive values; the binary plan does not,
+          # which is why only this rendering ever leaves the runner.
+          full="$(terraform show -no-color drift.tfplan)"
+          text="$(printf '%s' "$full" | head -c 50000)"
+          truncated=""
+          if [ "${#full}" -gt 50000 ]; then
+            truncated=$'\n\n_Report truncated at 50000 characters — see the workflow run for the full plan._'
+          fi
+          {
+            echo "text<<DRIFT_EOF"
+            printf '%s%s\n' "$text" "$truncated"
+            echo "DRIFT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open or update drift issue
+        id: issue
+        if: ${{ steps.plan.outputs.drift == 'true' && inputs.open-issue }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: ${{ inputs.issue-title }}
+          LABEL: ${{ inputs.issue-label }}
+          ASSIGNEES: ${{ inputs.issue-assignees }}
+          REPORT: ${{ steps.report.outputs.text }}
+          WORKDIR: ${{ inputs.working-directory }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # Backticks and fences here are literal markdown, not substitution.
+          # shellcheck disable=SC2016
+          body="$(printf '### %s\n\nModule: `%s`\nDetected: run [%s](%s)\n\n<details><summary>terraform plan</summary>\n\n```terraform\n%s\n```\n\n</details>\n' \
+            "$TITLE" "$WORKDIR" "${GITHUB_RUN_ID}" "$RUN_URL" "$REPORT")"
+
+          # Label-addressed, so the issue survives being retitled or edited.
+          gh label create "$LABEL" --description "Terraform drift tracked by CI" --color FBCA04 2>/dev/null || true
+
+          number="$(gh issue list --label "$LABEL" --state open --limit 1 --json number --jq '.[0].number // empty')"
+
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body "$body" >/dev/null
+            echo "::notice title=Drift issue::Updated #${number}"
+          else
+            create_args=(--title "$TITLE" --body "$body" --label "$LABEL")
+            if [ -n "$ASSIGNEES" ]; then
+              create_args+=(--assignee "$ASSIGNEES")
+            fi
+            url="$(gh issue create "${create_args[@]}")"
+            number="${url##*/}"
+            echo "::notice title=Drift issue::Opened #${number}"
+          fi
+          echo "number=${number}" >> "$GITHUB_OUTPUT"
+
+      - name: Close drift issue when clean
+        if: ${{ steps.plan.outputs.drift == 'false' && inputs.open-issue }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LABEL: ${{ inputs.issue-label }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          number="$(gh issue list --label "$LABEL" --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -z "$number" ]; then
+            exit 0
+          fi
+          gh issue comment "$number" --body "Drift resolved — [this run]($RUN_URL) found live state matching the configuration. Closing." >/dev/null
+          gh issue close "$number" >/dev/null
+          echo "::notice title=Drift issue::Closed #${number} — drift resolved"
+
+      - name: Write drift summary
+        if: always()
+        shell: bash
+        env:
+          DRIFT: ${{ steps.plan.outputs.drift }}
+          WORKDIR: ${{ inputs.working-directory }}
+          TF_VERSION: ${{ inputs.terraform-version }}
+          REFRESH_ONLY: ${{ inputs.refresh-only }}
+          ISSUE: ${{ steps.issue.outputs.number }}
+        run: |
+          set -euo pipefail
+          case "${DRIFT:-unknown}" in
+            true)  result=":warning: drift detected" ;;
+            false) result=":white_check_mark: no drift" ;;
+            *)     result=":x: check did not complete" ;;
+          esac
+          {
+            echo "### Terraform drift detection"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Module | \`${WORKDIR}\` |"
+            echo "| Terraform | \`${TF_VERSION}\` |"
+            if [ "${REFRESH_ONLY:-false}" = "true" ]; then mode="refresh-only"; else mode="full plan"; fi
+            echo "| Mode | ${mode} |"
+            echo "| Result | ${result} |"
+            [ -n "${ISSUE:-}" ] && echo "| Issue | #${ISSUE} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on drift
+        if: ${{ steps.plan.outputs.drift == 'true' && inputs.fail-on-drift }}
+        shell: bash
+        run: |
+          echo "::error title=Drift::Live state has drifted and fail-on-drift is enabled"
+          exit 1

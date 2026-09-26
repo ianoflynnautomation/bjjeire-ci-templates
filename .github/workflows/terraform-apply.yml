@@ -62,6 +62,17 @@ on:
         required: false
         type: boolean
         default: true
+      expose-outputs:
+        description: >-
+          Publish the root module's non-sensitive `terraform output` values as
+          the `outputs-json` workflow output, so a downstream job can consume
+          resource IDs and URLs without re-running Terraform. Outputs marked
+          `sensitive` are never published — they are registered with
+          ::add-mask:: and their names are listed instead. Off by default: a
+          workflow output is readable by the whole caller run.
+        required: false
+        type: boolean
+        default: false
     secrets:
       ARM_CLIENT_ID:
         description: "Azure AD app (workload identity) client ID for OIDC auth."
@@ -72,6 +83,16 @@ on:
       ARM_SUBSCRIPTION_ID:
         description: "Azure subscription ID."
         required: false
+    outputs:
+      outputs-json:
+        description: >-
+          JSON object of the root module's non-sensitive outputs, as
+          `{"name": value}`. Empty when expose-outputs is false or the apply
+          did not complete.
+        value: ${{ jobs.apply.outputs.outputs_json }}
+      sensitive-output-names:
+        description: "JSON array naming the outputs withheld because they are marked sensitive."
+        value: ${{ jobs.apply.outputs.sensitive_names }}
 
 jobs:
   apply:
@@ -82,6 +103,9 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      outputs_json: ${{ steps.tf-outputs.outputs.json }}
+      sensitive_names: ${{ steps.tf-outputs.outputs.sensitive-names }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -170,6 +194,32 @@ jobs:
           terraform apply -auto-approve tfplan
           echo "::endgroup::"
           echo "::notice title=Terraform apply::Applied plan from artifact '${PLAN_ARTIFACT}'"
+      - name: Collect Terraform outputs
+        id: tf-outputs
+        if: inputs.expose-outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="$(terraform output -json)"
+
+          # Mask first, so a sensitive value cannot surface in any later log
+          # line even though it is not published.
+          while IFS= read -r secret; do
+            [ -n "$secret" ] || continue
+            echo "::add-mask::${secret}"
+          done < <(jq -r '[.[] | select(.sensitive) | .value | tostring] | .[]' <<< "$raw")
+
+          public="$(jq -c '[to_entries[] | select(.value.sensitive | not)
+                            | {key: .key, value: .value.value}] | from_entries' <<< "$raw")"
+          sensitive="$(jq -c '[to_entries[] | select(.value.sensitive) | .key]' <<< "$raw")"
+
+          {
+            echo "json=${public}"
+            echo "sensitive-names=${sensitive}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice title=Terraform outputs::Published $(jq 'length' <<< "$public") output(s); withheld $(jq 'length' <<< "$sensitive") sensitive"
+
       - name: Write apply summary
         if: always()
         shell: bash

@@ -1,0 +1,420 @@
+name: Terraform Destroy (Reusable)
+
+# Tears down a Terraform-managed environment. Built for the ephemeral case —
+# a PR-scoped stack that outlived its pull request — but usable for any
+# environment you genuinely mean to remove.
+#
+# Destroy is the one Terraform verb with no undo, so this workflow is guarded
+# rather than convenient:
+#
+#   * `environment` is required, so the caller must route it through a GitHub
+#     environment and can attach required reviewers there.
+#   * `deny-workspaces` refuses to run against names that must never be torn
+#     down by automation. It defaults to prod/production and is checked before
+#     Terraform is even initialised.
+#   * `require-confirmation` makes a human echo the target name back. An
+#     automated teardown opts out explicitly, so the opt-out is visible in the
+#     caller rather than implied by the absence of a flag.
+#   * The destroy is planned first and the saved plan is applied, so what gets
+#     removed is exactly what the summary listed.
+#
+# `dry-run: true` plans the destroy and stops, which is the safe way to answer
+# "what would this take out?".
+#
+# The destroy plan is never uploaded: nothing downstream consumes it, and a
+# binary plan stores sensitive values in cleartext.
+#
+# Required caller permissions:
+#   contents: read
+#   id-token: write
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Directory containing the Terraform root module."
+        required: false
+        type: string
+        default: "."
+      terraform-version:
+        description: "Terraform CLI version passed to hashicorp/setup-terraform."
+        required: false
+        type: string
+        default: "1.10.5"
+      backend-config:
+        description: "Multi-line `key=value` pairs, each passed to `terraform init -backend-config=`."
+        required: false
+        type: string
+        default: ""
+      var-file:
+        description: >-
+          Optional path (relative to working-directory) passed to
+          `terraform plan -destroy -var-file=`. Destroy still evaluates
+          variables, so a module with required variables needs this.
+        required: false
+        type: string
+        default: ""
+      workspace:
+        description: >-
+          Terraform workspace to destroy. Selected, never created — if it does
+          not exist there is nothing to tear down and that is an error worth
+          seeing, not one to paper over.
+        required: false
+        type: string
+        default: ""
+      init-args:
+        description: "Extra arguments appended to `terraform init` (after backend-config flags)."
+        required: false
+        type: string
+        default: ""
+      destroy-args:
+        description: "Extra arguments appended to `terraform plan -destroy`."
+        required: false
+        type: string
+        default: ""
+      environment:
+        description: >-
+          GitHub environment gating the destroy. Required — attach required
+          reviewers there to put a human in front of an irreversible action.
+        required: true
+        type: string
+      dry-run:
+        description: "Plan the destroy and stop. Nothing is removed; the summary lists what would be."
+        required: false
+        type: boolean
+        default: false
+      require-confirmation:
+        description: >-
+          Require `confirmation` to match the target name (the workspace, or
+          working-directory when no workspace is set). Leave on for anything a
+          human triggers; set false only for automated teardown of an
+          environment CI created itself.
+        required: false
+        type: boolean
+        default: true
+      confirmation:
+        description: >-
+          Must equal the target name when require-confirmation is true. Wire it
+          to a workflow_dispatch input so the person destroying an environment
+          types its name.
+        required: false
+        type: string
+        default: ""
+      deny-workspaces:
+        description: >-
+          Comma-separated workspace names this workflow refuses to destroy,
+          checked before init and matched case-insensitively against the
+          trimmed target name. Set to an empty string to disable the guard —
+          but prefer narrowing it to widening the blast radius.
+        required: false
+        type: string
+        default: "prod,production"
+      delete-workspace:
+        description: >-
+          Run `terraform workspace delete` after a successful destroy. For
+          ephemeral per-PR workspaces, which otherwise accumulate in the backend
+          forever. Ignored on a dry run.
+        required: false
+        type: boolean
+        default: false
+      plugin-cache:
+        description: "Cache the Terraform plugin directory between runs."
+        required: false
+        type: boolean
+        default: true
+      runs-on:
+        description: "Runner label for the destroy job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout for the destroy job."
+        required: false
+        type: number
+        default: 60
+    secrets:
+      ARM_CLIENT_ID:
+        description: "Azure AD app (workload identity) client ID for OIDC auth."
+        required: false
+      ARM_TENANT_ID:
+        description: "Azure tenant ID for OIDC auth."
+        required: false
+      ARM_SUBSCRIPTION_ID:
+        description: "Azure subscription ID."
+        required: false
+    outputs:
+      destroyed:
+        description: "true when resources were actually destroyed. false on a dry run, or when there was nothing to destroy."
+        value: ${{ jobs.destroy.outputs.destroyed }}
+      resource-count:
+        description: "Number of resources the destroy plan proposed to remove."
+        value: ${{ jobs.destroy.outputs.resource-count }}
+
+jobs:
+  destroy:
+    name: Destroy
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      destroyed: ${{ steps.apply.outputs.destroyed || 'false' }}
+      resource-count: ${{ steps.plan.outputs.resource-count }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+    steps:
+      # Guard first, before checkout or credentials: a run that must not happen
+      # should not get as far as holding a cloud token.
+      - name: Check destroy guards
+        id: guard
+        shell: bash
+        working-directory: .
+        env:
+          WORKSPACE: ${{ inputs.workspace }}
+          WORKDIR: ${{ inputs.working-directory }}
+          DENY: ${{ inputs.deny-workspaces }}
+          REQUIRE_CONFIRMATION: ${{ inputs.require-confirmation }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          target="${WORKSPACE:-$WORKDIR}"
+          # Trim the target as well as the deny entries. A workspace arriving
+          # from an expression can carry whitespace, and " prod " must not slip
+          # past a guard that lists "prod".
+          target="${target#"${target%%[![:space:]]*}"}"; target="${target%"${target##*[![:space:]]}"}"
+          if [ -z "$target" ]; then
+            echo "::error title=No target::Neither workspace nor working-directory resolved to a name to destroy"
+            exit 1
+          fi
+
+          # Deny list is matched against the workspace name, or the module
+          # directory when the caller does not use workspaces. Matched
+          # case-insensitively: a guard should refuse "PROD" too, and a wrongly
+          # refused destroy costs far less than a wrongly permitted one.
+          target_lc="$(printf '%s' "$target" | tr '[:upper:]' '[:lower:]')"
+          IFS=',' read -ra denied <<< "$DENY"
+          for entry in "${denied[@]}"; do
+            entry="${entry#"${entry%%[![:space:]]*}"}"; entry="${entry%"${entry##*[![:space:]]}"}"
+            [ -n "$entry" ] || continue
+            entry_lc="$(printf '%s' "$entry" | tr '[:upper:]' '[:lower:]')"
+            if [ "$entry_lc" = "$target_lc" ]; then
+              echo "::error title=Destroy refused::'${target}' is in deny-workspaces — this workflow will not destroy it"
+              exit 1
+            fi
+          done
+
+          if [ "$REQUIRE_CONFIRMATION" = "true" ]; then
+            if [ -z "$CONFIRMATION" ]; then
+              echo "::error title=Confirmation required::Set 'confirmation' to '${target}' to destroy it, or set require-confirmation: false for automated teardown"
+              exit 1
+            fi
+            if [ "$CONFIRMATION" != "$target" ]; then
+              echo "::error title=Confirmation mismatch::confirmation '${CONFIRMATION}' does not match the target '${target}'"
+              exit 1
+            fi
+          else
+            echo "::warning title=Unconfirmed destroy::require-confirmation is false — proceeding without a human confirming '${target}'"
+          fi
+
+          echo "target=${target}" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Destroy target::${target}"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Prepare plugin cache directory
+        if: inputs.plugin-cache
+        shell: bash
+        run: mkdir -p "$HOME/.terraform.d/plugin-cache"
+
+      - name: Cache Terraform plugins
+        if: inputs.plugin-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: ${{ runner.os }}-tfplugins-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', inputs.working-directory)) }}
+          restore-keys: |
+            ${{ runner.os }}-tfplugins-${{ inputs.terraform-version }}-
+            ${{ runner.os }}-tfplugins-
+
+      - name: Configure plugin cache
+        if: inputs.plugin-cache
+        shell: bash
+        run: echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> "$GITHUB_ENV"
+
+      - name: Terraform init
+        shell: bash
+        env:
+          BACKEND_CONFIG: ${{ inputs.backend-config }}
+          INIT_ARGS: ${{ inputs.init-args }}
+        run: |
+          set -euo pipefail
+          echo "::group::terraform init"
+          BACKEND_ARGS=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && BACKEND_ARGS+=("-backend-config=${line}")
+          done <<< "$BACKEND_CONFIG"
+          EXTRA=()
+          if [ -n "$INIT_ARGS" ]; then
+            read -r -a EXTRA <<< "$INIT_ARGS"
+          fi
+          terraform init "${BACKEND_ARGS[@]}" "${EXTRA[@]}"
+          echo "::endgroup::"
+
+      - name: Select workspace
+        if: inputs.workspace != ''
+        shell: bash
+        env:
+          TF_WORKSPACE_NAME: ${{ inputs.workspace }}
+        run: terraform workspace select "$TF_WORKSPACE_NAME"
+
+      - name: Plan destroy
+        id: plan
+        shell: bash
+        env:
+          VAR_FILE: ${{ inputs.var-file }}
+          DESTROY_ARGS: ${{ inputs.destroy-args }}
+        run: |
+          set -euo pipefail
+          args=(-destroy -detailed-exitcode -no-color -out=destroy.tfplan)
+          if [ -n "$VAR_FILE" ]; then
+            args+=(-var-file="$VAR_FILE")
+          fi
+          EXTRA_ARGS=()
+          if [ -n "$DESTROY_ARGS" ]; then
+            read -r -a EXTRA_ARGS <<< "$DESTROY_ARGS"
+          fi
+
+          echo "::group::terraform plan -destroy"
+          set +e
+          terraform plan "${args[@]}" "${EXTRA_ARGS[@]}"
+          ec=$?
+          set -e
+          echo "::endgroup::"
+
+          case $ec in
+            0) count=0
+               echo "has-changes=false" >> "$GITHUB_OUTPUT"
+               echo "::notice title=Nothing to destroy::State holds no resources to remove" ;;
+            2) count="$(terraform show -json destroy.tfplan \
+                        | jq '[.resource_changes[]? | select(.change.actions | index("delete"))] | length')"
+               echo "has-changes=true" >> "$GITHUB_OUTPUT"
+               echo "::warning title=Destroy planned::${count} resource(s) will be destroyed" ;;
+            *) echo "::error title=Destroy plan failed::terraform plan -destroy exited ${ec}"
+               exit "$ec" ;;
+          esac
+          echo "resource-count=${count}" >> "$GITHUB_OUTPUT"
+
+      - name: List resources to be destroyed
+        if: steps.plan.outputs.has-changes == 'true'
+        shell: bash
+        env:
+          TARGET: ${{ steps.guard.outputs.target }}
+          COUNT: ${{ steps.plan.outputs.resource-count }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          addresses="$(terraform show -json destroy.tfplan \
+                       | jq -r '.resource_changes[]? | select(.change.actions | index("delete")) | .address' \
+                       | sort)"
+          echo "::group::Resources to destroy"
+          printf '%s\n' "$addresses"
+          echo "::endgroup::"
+          {
+            echo "### Terraform destroy"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Target | \`${TARGET}\` |"
+            echo "| Resources | ${COUNT} |"
+            echo "| Mode | ${DRY_RUN:-false} |"
+            echo ""
+            echo "<details><summary>Resources to be destroyed</summary>"
+            echo ""
+            echo '```'
+            printf '%s\n' "$addresses"
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop on dry run
+        if: inputs.dry-run
+        shell: bash
+        env:
+          COUNT: ${{ steps.plan.outputs.resource-count }}
+        run: echo "::notice title=Dry run::Planned the destroy of ${COUNT} resource(s) and stopped; nothing was removed"
+
+      - name: Terraform destroy
+        id: apply
+        if: ${{ !inputs.dry-run && steps.plan.outputs.has-changes == 'true' }}
+        shell: bash
+        env:
+          TARGET: ${{ steps.guard.outputs.target }}
+          COUNT: ${{ steps.plan.outputs.resource-count }}
+        run: |
+          set -euo pipefail
+          echo "::group::terraform apply (destroy plan)"
+          # Applies the saved plan, so exactly the resources listed above are
+          # removed — not whatever a fresh destroy would decide to take.
+          terraform apply -auto-approve destroy.tfplan
+          echo "::endgroup::"
+          echo "destroyed=true" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Destroyed::Removed ${COUNT} resource(s) from '${TARGET}'"
+
+      - name: Delete workspace
+        if: ${{ !inputs.dry-run && inputs.delete-workspace && inputs.workspace != '' && steps.apply.outcome == 'success' }}
+        shell: bash
+        env:
+          TF_WORKSPACE_NAME: ${{ inputs.workspace }}
+        run: |
+          set -euo pipefail
+          # Cannot delete the workspace you are standing in.
+          terraform workspace select default
+          terraform workspace delete "$TF_WORKSPACE_NAME"
+          echo "::notice title=Workspace::Deleted workspace '${TF_WORKSPACE_NAME}'"
+
+      - name: Write destroy summary
+        if: always()
+        shell: bash
+        env:
+          TARGET: ${{ steps.guard.outputs.target }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          COUNT: ${{ steps.plan.outputs.resource-count }}
+          DESTROYED: ${{ steps.apply.outputs.destroyed }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          if [ "${DESTROYED:-false}" = "true" ]; then
+            result=":white_check_mark: destroyed ${COUNT:-0} resource(s)"
+          elif [ "${DRY_RUN}" = "true" ]; then
+            result=":mag: dry run — ${COUNT:-0} resource(s) would be destroyed"
+          elif [ "${COUNT:-0}" = "0" ]; then
+            result=":heavy_minus_sign: nothing to destroy"
+          else
+            result=":x: did not complete (${JOB_STATUS})"
+          fi
+          {
+            echo "### Terraform destroy result"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Target | \`${TARGET:-unknown}\` |"
+            echo "| Result | ${result} |"
+          } >> "$GITHUB_STEP_SUMMARY"

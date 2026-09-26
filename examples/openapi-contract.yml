@@ -69,6 +69,7 @@ jobs:
           image: ${{ env.CONTRACT_IMAGE }}
           token: ${{ github.token }}
           user: ${{ github.actor }}
+          err-ignore: contracts/openapi-accepted-breaks.txt
 
   publish:
     name: Publish Contract

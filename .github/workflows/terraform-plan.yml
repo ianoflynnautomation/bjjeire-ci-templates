@@ -8,6 +8,14 @@ name: Terraform Plan (Reusable)
 # credentials. For other clouds, omit the ARM_* secrets and provide auth via
 # `secrets: inherit` + env on the caller, or extend this workflow.
 #
+# SENSITIVE DATA: the uploaded `tfplan` is a binary plan file, and Terraform
+# stores values in it in cleartext — including anything marked `sensitive`.
+# Anyone who can read the run's artifacts can read those values. The artifact
+# is kept at retention-days: 1 to bound the window; do not raise it, and do not
+# run this workflow on a public repository against state holding real secrets.
+# The step summary is safe by contrast: `terraform show` redacts sensitive
+# values to "(sensitive value)".
+#
 # Required caller permissions:
 #   contents: read
 #   id-token: write
@@ -100,6 +108,8 @@ jobs:
     name: Validate
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -213,9 +223,12 @@ jobs:
           if [ -n "$VAR_FILE" ]; then
             VAR_FILE_ARG=(-var-file="$VAR_FILE")
           fi
+          EXTRA_ARGS=()
+          if [ -n "$PLAN_ARGS" ]; then
+            read -r -a EXTRA_ARGS <<< "$PLAN_ARGS"
+          fi
           set +e
-          # shellcheck disable=SC2086
-          terraform plan -out=tfplan -detailed-exitcode "${VAR_FILE_ARG[@]}" $PLAN_ARGS
+          terraform plan -out=tfplan -detailed-exitcode "${VAR_FILE_ARG[@]}" "${EXTRA_ARGS[@]}"
           ec=$?
           set -e
           echo "::endgroup::"
@@ -238,7 +251,14 @@ jobs:
           TF_VERSION: ${{ inputs.terraform-version }}
         run: |
           set -euo pipefail
-          PLAN_TEXT=$(terraform show -no-color tfplan | head -c 60000)
+          # Step summaries cap at 1 MiB; truncate well short of it and say so,
+          # rather than silently dropping the tail of a large plan.
+          PLAN_FULL=$(terraform show -no-color tfplan)
+          PLAN_TEXT=$(printf '%s' "$PLAN_FULL" | head -c 60000)
+          TRUNCATED=""
+          if [ "${#PLAN_FULL}" -gt 60000 ]; then
+            TRUNCATED="_Plan truncated at 60000 characters — see the \`terraform plan\` step log for the full output._"
+          fi
           {
             echo "### Terraform plan"
             echo ""
@@ -251,6 +271,7 @@ jobs:
             echo '```terraform'
             echo "$PLAN_TEXT"
             echo '```'
+            [ -n "$TRUNCATED" ] && { echo ""; echo "$TRUNCATED"; }
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload plan artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

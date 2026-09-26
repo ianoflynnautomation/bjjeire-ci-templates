@@ -25,6 +25,13 @@ inputs:
       Set false to fail closed on any denied/unauthorized response.
     required: false
     default: 'true'
+  err-ignore:
+    description: >-
+      Optional workspace path of accepted breaking changes. oasdiff ignores an
+      error only when a line contains both its location and its description.
+      Unset ignores nothing. A missing file fails the gate.
+    required: false
+    default: ''
 outputs:
   skipped:
     description: 'true when no published baseline exists yet and the gate was skipped (first publish).'
@@ -89,6 +96,18 @@ runs:
         echo "skip=false" >> "$GITHUB_OUTPUT"
         echo "::endgroup::"
 
+    - name: Require the accepted-breaks file when configured
+      if: steps.baseline.outputs.skip != 'true' && inputs.err-ignore != ''
+      shell: bash
+      env:
+        ERR_IGNORE: ${{ inputs.err-ignore }}
+      run: |
+        set -euo pipefail
+        if [ ! -f "$ERR_IGNORE" ]; then
+          echo "::error title=OpenAPI gate::Accepted-breaks file not found: ${ERR_IGNORE}"
+          exit 1
+        fi
+
     - name: Compare against published baseline
       if: steps.baseline.outputs.skip != 'true'
       uses: oasdiff/oasdiff-action/breaking@2649ebe137aeb72a95707671204e829f86e091fc  # v0.1.13
@@ -96,6 +115,7 @@ runs:
         base: ${{ steps.baseline.outputs.base_spec }}
         revision: ${{ inputs.current-spec }}
         fail-on: ERR
+        err-ignore: ${{ inputs.err-ignore }}
         review: false
 
     - name: Report gate result

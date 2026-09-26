@@ -1,0 +1,79 @@
+# Terraform teardown — two callers, because the two use cases want opposite
+# defaults.
+#
+# Copy into the consumer repo as .github/workflows/terraform-destroy.yml.
+
+name: Terraform Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      workspace:
+        description: "Workspace to destroy"
+        required: true
+        type: string
+      confirmation:
+        description: "Type the workspace name again to confirm"
+        required: true
+        type: string
+      dry-run:
+        description: "Plan the destroy without executing it"
+        required: false
+        default: true
+        type: boolean
+  pull_request:
+    types: [closed]
+
+concurrency:
+  group: terraform-destroy-${{ github.event.inputs.workspace || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  manual:
+    name: Manual destroy
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/terraform-destroy.yml@v1
+    with:
+      working-directory: infra/env
+      workspace: ${{ inputs.workspace }}
+      confirmation: ${{ inputs.confirmation }}
+      dry-run: ${{ inputs.dry-run }}
+      environment: destroy-approval
+      backend-config: |
+        resource_group_name=rg-tfstate
+        storage_account_name=sttfstatedev
+        container_name=tfstate
+        key=env.tfstate
+    secrets:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+  ephemeral:
+    name: Tear down PR environment
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/terraform-destroy.yml@v1
+    with:
+      working-directory: infra/env
+      workspace: pr-${{ github.event.pull_request.number }}
+      require-confirmation: false
+      delete-workspace: true
+      environment: ephemeral
+      backend-config: |
+        resource_group_name=rg-tfstate
+        storage_account_name=sttfstatedev
+        container_name=tfstate
+        key=env.tfstate
+    secrets:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}

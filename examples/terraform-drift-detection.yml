@@ -1,0 +1,56 @@
+# Scheduled Terraform drift detection.
+#
+# Copy into the consumer repo as .github/workflows/terraform-drift.yml.
+#
+# Answers "has anything changed underneath us since the last apply?" — console
+# edits, out-of-band scripts, provider-side changes. Opens one issue on drift,
+# keeps it updated, and closes it when a later run comes back clean.
+#
+# The cron is deliberately on weekday mornings: drift found at 06:00 Monday
+# gets looked at, drift found at 03:00 Sunday does not.
+
+name: Terraform Drift
+
+on:
+  schedule:
+    - cron: "0 6 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      module:
+        description: "Module directory to check"
+        required: false
+        default: "infra/prod"
+        type: string
+        
+concurrency:
+  group: terraform-drift-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prod:
+    name: prod
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    uses: ianoflynnautomation/bjjeire-ci-templates/.github/workflows/terraform-drift-detection.yml@v1
+    with:
+      working-directory: ${{ inputs.module || 'infra/prod' }}
+      terraform-version: "1.10.5"
+      environment: prod
+      backend-config: |
+        resource_group_name=rg-tfstate
+        storage_account_name=sttfstateprod
+        container_name=tfstate
+        key=prod.tfstate
+      issue-label: terraform-drift-prod
+      issue-title: "Terraform drift: infra/prod"
+      issue-assignees: ianoflynn
+      fail-on-drift: false
+    secrets:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}

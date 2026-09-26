@@ -393,10 +393,13 @@ jobs:
           set -euo pipefail
           read -ra files <<< "$FILES"
           echo "::group::hadolint"
+          # `hadolint` must be named explicitly: the image sets no ENTRYPOINT,
+          # only CMD ["/bin/hadolint", "-"], so bare file arguments replace the
+          # CMD and Docker tries to exec the Dockerfile itself (exit 126).
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/github/workspace" \
             -w /github/workspace \
-            "$IMAGE" "${files[@]}"
+            "$IMAGE" hadolint "${files[@]}"
           echo "::endgroup::"
 
       - name: Write scan summary
