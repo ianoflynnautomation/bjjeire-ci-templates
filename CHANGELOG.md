@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.7.0...v1.8.0) (2026-09-26)
+
+
+### Features
+
+* add terraform workflows ([8d58292](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/8d58292dcdfb3e02488cb5603d1c50478480a651))
+* add terraform workflows ([164736d](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/164736d136b22437263e0cffb374f3f30ab3b51f))
+
 ## [1.7.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.6.2...v1.7.0) (2026-08-30)
 
 
