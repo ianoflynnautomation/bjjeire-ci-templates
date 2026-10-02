@@ -83,7 +83,7 @@ jobs:
         api:CF_ACCESS_CLIENT_ID=
         api:CF_ACCESS_CLIENT_SECRET=
 
-      playwright-image: mcr.microsoft.com/playwright:v1.61.0-noble
+      playwright-image: mcr.microsoft.com/playwright:v1.63.0-noble
       fail-on-flaky: true
       max-parallel: 8
       publish-report: true

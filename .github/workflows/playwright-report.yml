@@ -277,7 +277,7 @@ jobs:
           fi
           echo "::group::playwright merge-reports (${valid} blob(s))"
           # Playwright's json reporter writes to STDOUT and has no output-file
-          # env var (1.61 ships only PLAYWRIGHT_HTML_OUTPUT_DIR), so a single
+          # env var (1.63 ships only PLAYWRIGHT_HTML_OUTPUT_DIR), so a single
           # `--reporter html,json` never creates results-json-path: the upload
           # warns "No files were found", no *-json-results artifact exists, and
           # downstream audit packaging fails on the missing artifact. Run the
