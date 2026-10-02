@@ -10,7 +10,7 @@ Centralized reusable GitHub Actions workflows and composite actions — the gold
 |---|---|
 | [`dotnet-build-test.yml`](.github/workflows/dotnet-build-test.yml) | Build a .NET solution once, optional `dotnet format` gate, matrix test run against shared build output |
 | [`maven-build-test.yml`](.github/workflows/maven-build-test.yml) | `mvn verify` (surefire + failsafe) on the host runner for Testcontainers, optional JUnit report check |
-| [`node-build-test.yml`](.github/workflows/node-build-test.yml) | Container-first Node job: node_modules cache, install, ordered commands, artifact in/out + failure diagnostics |
+| [`node-build-test.yml`](.github/workflows/node-build-test.yml) | Container-first Node job: npm download cache (`~/.npm`), `npm ci`, ordered commands, artifact in/out + failure diagnostics |
 | [`playwright-tests.yml`](.github/workflows/playwright-tests.yml) | Sharded Playwright run against an environment that already exists — plans the matrix, runs shards, merges and gates |
 | [`playwright-docker-tests.yml`](.github/workflows/playwright-docker-tests.yml) | Sharded Playwright run that provisions its own Docker Compose stack per shard, plus a sticky PR result comment |
 | [`playwright-report.yml`](.github/workflows/playwright-report.yml) | Shared tail for any sharded Playwright run: merge blob reports, summarise counts, publish to Pages, gate on failures/flakes |

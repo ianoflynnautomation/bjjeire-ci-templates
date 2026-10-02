@@ -1,12 +1,17 @@
 name: Node Build & Test (Reusable)
 
-# Reusable golden path for Node/JS jobs: container-first toolchain, node_modules
-# cache, `npm ci`, then an ordered list of caller-supplied commands, with
-# optional artifact download in and artifact upload out.
+# Reusable golden path for Node/JS jobs: container-first toolchain, the npm
+# download cache (~/.npm), `npm ci`, then an ordered list of caller-supplied
+# commands, with optional artifact download in and artifact upload out.
 #
-# One job, one purpose — call it once per logical check (lint+unit, build,
-# coverage, browser tests, contract generation) so failures stay attributable
-# and the jobs run in parallel.
+# `npm ci` deletes node_modules before it installs, so caching that directory
+# does not survive the install. The cache below is the npm tarball cache, which
+# `npm ci` actually reads. Callers that run several jobs with the same
+# cache-key-prefix share that cache and should run in parallel.
+#
+# One job, one purpose — call it once per logical check (typecheck, lint, unit,
+# integration, build, browser tests, contract generation) so failures stay
+# attributable and the jobs run in parallel.
 #
 # Required caller permissions:
 #   contents: read
@@ -21,9 +26,10 @@ name: Node Build & Test (Reusable)
 # from the caller; declaring the same group in both self-deadlocks. Put
 # concurrency on the caller only.
 #
-# The node_modules cache is inlined rather than delegated to
-# actions/setup-node-cached: a relative `uses: ./actions/...` inside a reusable
-# workflow resolves against the *caller* repo, not this one.
+# The npm cache is inlined rather than delegated to actions/setup-node-cached:
+# a relative `uses: ./actions/...` inside a reusable workflow resolves against
+# the *caller* repo, not this one. setup-node-cached still caches node_modules,
+# which `npm ci` removes.
 
 on:
   workflow_call:
@@ -66,7 +72,7 @@ on:
         type: string
         default: "npm ci"
       cache-key-prefix:
-        description: "Prefix for the node_modules cache key — segment monorepo caches per package."
+        description: "Prefix for the npm download cache key — segment monorepo caches per package. Jobs that share a prefix and lockfile restore the same ~/.npm cache."
         required: false
         type: string
         default: "node"
@@ -169,14 +175,31 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Cache Node modules
+      - name: Resolve npm cache directory
+        id: npm-cache
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          dir="$(npm config get cache)"
+          if [ -z "${dir}" ] || [ "${dir}" = "null" ] || [ "${dir}" = "undefined" ]; then
+            echo "::error title=npm cache::npm config get cache returned an empty path"
+            exit 1
+          fi
+          echo "dir=${dir}" >> "$GITHUB_OUTPUT"
+          echo "::notice title=npm cache::${dir}"
+
+      # Key prefix is `npm-` so a hit cannot restore an older node_modules
+      # archive into the tarball cache. restore-keys cover a lockfile change:
+      # npm ci reuses the tarballs it already has and downloads the rest.
+      - name: Cache npm download cache
         id: node_cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          path: ${{ inputs.working-directory }}/node_modules
-          key: ${{ runner.os }}-${{ inputs.cache-key-prefix }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory), format('{0}/yarn.lock', inputs.working-directory), format('{0}/pnpm-lock.yaml', inputs.working-directory)) }}
+          path: ${{ steps.npm-cache.outputs.dir }}
+          key: ${{ runner.os }}-npm-${{ inputs.cache-key-prefix }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory), format('{0}/yarn.lock', inputs.working-directory), format('{0}/pnpm-lock.yaml', inputs.working-directory)) }}
           restore-keys: |
-            ${{ runner.os }}-${{ inputs.cache-key-prefix }}-
+            ${{ runner.os }}-npm-${{ inputs.cache-key-prefix }}-
 
       - name: Install dependencies
         if: inputs.install
@@ -190,7 +213,7 @@ jobs:
           echo "::group::${INSTALL_COMMAND}"
           bash -c "$INSTALL_COMMAND"
           echo "::endgroup::"
-          echo "::notice title=Dependencies::${INSTALL_COMMAND} complete (cache-hit=${CACHE_HIT:-false})"
+          echo "::notice title=Dependencies::${INSTALL_COMMAND} complete (npm-cache-hit=${CACHE_HIT:-false})"
 
       - name: Export environment
         uses: ianoflynnautomation/bjjeire-ci-templates/actions/export-test-env@v1
