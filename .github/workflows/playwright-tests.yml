@@ -136,7 +136,7 @@ on:
           version, or a digest.
         required: false
         type: string
-        default: "mcr.microsoft.com/playwright:v1.61.0-noble"
+        default: "mcr.microsoft.com/playwright:v1.63.0-noble"
       install-command:
         description: "Dependency install command run inside the test container."
         required: false

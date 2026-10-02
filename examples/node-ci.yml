@@ -1,6 +1,3 @@
-# Example caller: PR validation for a Node/React app using the shared
-# node-build-test workflow plus the path-filter and aggregate-gate composites.
-# Copy into your repo as .github/workflows/ci-pr.yml and adjust paths.
 name: CI PR Validation
 
 on:
@@ -103,7 +100,7 @@ jobs:
     with:
       job-name: Vitest Browser Suite
       working-directory: src/my-app
-      container-image: mcr.microsoft.com/playwright:v1.61.0-noble
+      container-image: mcr.microsoft.com/playwright:v1.63.0-noble
       cache-key-prefix: my-app
       timeout-minutes: 20
       commands: npm run test:browser
