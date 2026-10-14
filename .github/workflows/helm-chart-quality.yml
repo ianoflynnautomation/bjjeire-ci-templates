@@ -372,7 +372,7 @@ jobs:
 
       - name: Setup kubeconform
         if: inputs.validate
-        uses: fluxcd/pkg/actions/kubeconform@dfc427c54394de76e0053c2eba45699fad01c3b4  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
+        uses: fluxcd/pkg/actions/kubeconform@32687b5b84c0ecc8179381f6a2a61476d84c1f50  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
         with:
           version: ${{ inputs.kubeconform-version }}
 
@@ -456,7 +456,7 @@ jobs:
 
       - name: Upload rendered manifests
         if: always() && inputs.upload-artifact && steps.render.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ inputs.artifact-name }}
           path: ${{ inputs.output-dir }}/
