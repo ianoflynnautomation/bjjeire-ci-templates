@@ -180,18 +180,18 @@ jobs:
       # repo, not this one. See CONTRIBUTING.md.
       - name: Setup Flux CLI
         if: inputs.flux-version != ''
-        uses: fluxcd/flux2/action@889be9d6cc8afa8ed639e1e1ba4ab678e3b38d8c  # v2.9.4
+        uses: fluxcd/flux2/action@b9c17924adb533d3617ec7de97a7b0f4acc07b39  # v2.9.6
         with:
           version: ${{ inputs.flux-version }}
           token: ${{ github.token }}
 
       - name: Setup Kustomize
-        uses: fluxcd/pkg/actions/kustomize@dfc427c54394de76e0053c2eba45699fad01c3b4  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
+        uses: fluxcd/pkg/actions/kustomize@3c312fb15aebb0143b85da9198f155b4084b2268  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
         with:
           version: ${{ inputs.kustomize-version }}
 
       - name: Setup kubeconform
-        uses: fluxcd/pkg/actions/kubeconform@dfc427c54394de76e0053c2eba45699fad01c3b4  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
+        uses: fluxcd/pkg/actions/kubeconform@3c312fb15aebb0143b85da9198f155b4084b2268  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
         with:
           version: ${{ inputs.kubeconform-version }}
 
@@ -393,7 +393,7 @@ jobs:
 
       - name: Upload rendered manifests
         if: inputs.upload-artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ inputs.artifact-name }}
           path: ${{ inputs.output-dir }}/
