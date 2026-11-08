@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.1](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.8.0...v1.8.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* cache npm downloads in node-build-test ([f69cd6a](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/f69cd6a0c7977cb516ae8f7fe8fbdb1b7c1bc0a1))
+
 ## [1.8.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.7.0...v1.8.0) (2026-09-26)
 
 
