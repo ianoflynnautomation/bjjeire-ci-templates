@@ -260,7 +260,7 @@ jobs:
           echo "::notice title=Build .NET::Solution built successfully ($CONFIGURATION)"
       - name: Upload build output
         if: inputs.test-projects != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ inputs.build-artifact-name }}
           path: ${{ inputs.build-artifact-paths }}
@@ -312,7 +312,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ inputs.nuget-cache-key-prefix }}-
       - name: Download build output
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: ${{ inputs.build-artifact-name }}
           path: .
@@ -350,7 +350,7 @@ jobs:
           echo "::notice title=Tests passed::${RESULTS_PREFIX}"
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: test_results_${{ matrix.name }}
           path: TestResults/${{ matrix.name }}
@@ -372,7 +372,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Download test result artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           pattern: test_results_*
           path: test_artifacts
@@ -386,7 +386,7 @@ jobs:
           TRX_COUNT="$(find test_artifacts -type f -name '*.trx' | wc -l | tr -d ' ')"
           echo "::notice title=Test artifacts::Found ${TRX_COUNT} TRX file(s)"
       - name: Publish test results summary
-        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2  # v3.0.0
+        uses: dorny/test-reporter@d1b5dff021aa968b288b02285a8bf47471c5928a  # v3.2.0
         with:
           name: ${{ inputs.test-report-name }}
           path: "test_artifacts/**/*.trx"
