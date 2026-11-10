@@ -214,7 +214,7 @@ jobs:
 
       - name: Download blob reports
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           pattern: ${{ inputs.blob-artifact-pattern }}
           merge-multiple: true
@@ -344,7 +344,7 @@ jobs:
 
       - name: Upload HTML report
         if: steps.merge.outputs.skipped == 'false'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ inputs.artifact-prefix }}-html-report
           path: ${{ inputs.working-directory }}/${{ inputs.report-dir }}
@@ -354,7 +354,7 @@ jobs:
 
       - name: Upload JSON results
         if: steps.merge.outputs.skipped == 'false'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ inputs.artifact-prefix }}-json-results
           path: ${{ inputs.working-directory }}/${{ inputs.results-json-path }}
@@ -364,7 +364,7 @@ jobs:
 
       - name: Upload JUnit report
         if: steps.merge.outputs.skipped == 'false' && inputs.upload-junit
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ inputs.artifact-prefix }}-junit
           path: ${{ inputs.working-directory }}/${{ inputs.junit-path }}
@@ -395,7 +395,7 @@ jobs:
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6
 
       - name: Download HTML report
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: ${{ needs.merge.outputs.report_artifact_name }}
           path: ${{ runner.temp }}/html-report
@@ -434,7 +434,7 @@ jobs:
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128  # v5.0.0
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
         with:
           artifact_name: ${{ env.PAGES_ARTIFACT_NAME }}
 
@@ -500,11 +500,11 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: ${{ inputs.artifact-prefix }}-json-results
           path: pw
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         continue-on-error: true
         with:
           name: ${{ inputs.artifact-prefix }}-junit
