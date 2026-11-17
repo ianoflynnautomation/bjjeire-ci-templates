@@ -137,7 +137,7 @@ jobs:
           echo "parked=${parked}" >> "$GITHUB_OUTPUT"
           echo "::notice title=actionlint::Skipped ${parked} generated workflow file(s) matching '${EXCLUDE:-<none>}'"
       - name: Run actionlint
-        uses: reviewdog/action-actionlint@dbe5299849118fd6f099ba563d263d770955a64a  # v1.73.2
+        uses: reviewdog/action-actionlint@ae857e78c1b42b3d0a49637181b09d3d56d402b4  # v1.84.1
         with:
           fail_level: ${{ inputs.actionlint-fail-level }}
           reporter: github-check
