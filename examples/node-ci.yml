@@ -100,7 +100,7 @@ jobs:
     with:
       job-name: Vitest Browser Suite
       working-directory: src/my-app
-      container-image: mcr.microsoft.com/playwright:v1.63.0-noble
+      container-image: mcr.microsoft.com/playwright:v1.65.1-noble
       cache-key-prefix: my-app
       timeout-minutes: 20
       commands: npm run test:browser
