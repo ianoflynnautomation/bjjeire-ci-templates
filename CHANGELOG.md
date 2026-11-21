@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.0](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.8.1...v1.9.0) (2026-11-21)
+
+
+### Features
+
+* update playwright version from 1.64.1 to 1.65.1 ([effd229](https://github.com/ianoflynnautomation/bjjeire-ci-templates/commit/effd229ba5b8c7ff4beecfa80ca5c0b820dc48a8))
+
 ## [1.8.1](https://github.com/ianoflynnautomation/bjjeire-ci-templates/compare/v1.8.0...v1.8.1) (2026-11-21)
 
 
