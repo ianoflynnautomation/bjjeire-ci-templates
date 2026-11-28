@@ -180,18 +180,18 @@ jobs:
       # repo, not this one. See CONTRIBUTING.md.
       - name: Setup Flux CLI
         if: inputs.flux-version != ''
-        uses: fluxcd/flux2/action@3fa784edd773d56630bb9f62645e08f70c2cff0a  # v2.10.0
+        uses: fluxcd/flux2/action@23dcfe98fe672acdf44ecd9c60cbac41b57f5de8  # v2.10.1
         with:
           version: ${{ inputs.flux-version }}
           token: ${{ github.token }}
 
       - name: Setup Kustomize
-        uses: fluxcd/pkg/actions/kustomize@788e904c855afe0d3e000f479a17e217bf489172  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
+        uses: fluxcd/pkg/actions/kustomize@5e6f942cdd300f4092c0be92c7ef54c72af65476  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
         with:
           version: ${{ inputs.kustomize-version }}
 
       - name: Setup kubeconform
-        uses: fluxcd/pkg/actions/kubeconform@788e904c855afe0d3e000f479a17e217bf489172  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
+        uses: fluxcd/pkg/actions/kubeconform@5e6f942cdd300f4092c0be92c7ef54c72af65476  # main @ 2026-07-29 (fluxcd/pkg publishes no actions/* tags)
         with:
           version: ${{ inputs.kubeconform-version }}
 
